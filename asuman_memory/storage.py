@@ -59,7 +59,12 @@ CREATE TABLE IF NOT EXISTS memories (
     source_session TEXT,
     created_at REAL NOT NULL,
     updated_at REAL,
-    vector_rowid INTEGER
+    vector_rowid INTEGER,
+    -- Ebbinghaus strength + last access timestamp
+    strength REAL DEFAULT 1.0,
+    last_accessed_at REAL,
+    -- Soft-delete / archive support
+    deleted_at REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
@@ -177,6 +182,38 @@ class MemoryStorage:
         except sqlite3.OperationalError:
             pass  # already exists
 
+        # Safe migrations for existing DBs ---------------------------------
+        def _col_exists(table: str, col: str) -> bool:
+            try:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                return any(r[1] == col for r in rows)
+            except Exception:
+                return False
+
+        def _add_col(table: str, coldef: str, colname: str) -> None:
+            if _col_exists(table, colname):
+                return
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+                logger.info("Schema migration: added %s.%s", table, colname)
+            except sqlite3.OperationalError as exc:
+                # Column may already exist due to concurrent migration.
+                logger.debug("Schema migration skipped for %s.%s: %s", table, colname, exc)
+
+        # B12 patterns: strength + last_accessed_at
+        _add_col("memories", "strength REAL DEFAULT 1.0", "strength")
+        _add_col("memories", "last_accessed_at REAL", "last_accessed_at")
+        # Consolidation: soft-delete
+        _add_col("memories", "deleted_at REAL", "deleted_at")
+
+        # Backfill last_accessed_at for existing rows (keep idempotent)
+        try:
+            conn.execute(
+                "UPDATE memories SET last_accessed_at = created_at WHERE last_accessed_at IS NULL"
+            )
+        except Exception:
+            pass
+
         conn.commit()
 
     # ------------------------------------------------------------------
@@ -207,9 +244,11 @@ class MemoryStorage:
 
         conn.execute(
             """INSERT OR REPLACE INTO memories
-               (id, text, category, importance, source_session, created_at, updated_at, vector_rowid)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (mid, text, category, importance, source_session, now, now, vector_rowid),
+               (id, text, category, importance, source_session,
+                created_at, updated_at, vector_rowid,
+                strength, last_accessed_at, deleted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+            (mid, text, category, importance, source_session, now, now, vector_rowid, 1.0, now),
         )
 
         # FTS5 sync
@@ -305,6 +344,198 @@ class MemoryStorage:
         return True
 
     # ------------------------------------------------------------------
+    # Ebbinghaus strength / spaced repetition
+    # ------------------------------------------------------------------
+
+    def boost_strength(self, memory_id: str) -> bool:
+        """Boost strength on retrieval (spaced repetition).
+
+        strength = min(strength + 0.3, 5.0)
+        last_accessed_at = now
+        """
+        conn = self._get_conn()
+        now = time.time()
+        try:
+            cur = conn.execute(
+                """
+                UPDATE memories
+                   SET strength = MIN(COALESCE(strength, 1.0) + 0.3, 5.0),
+                       last_accessed_at = ?
+                 WHERE id = ? AND deleted_at IS NULL
+                """,
+                (now, memory_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as exc:
+            logger.debug("boost_strength failed for %s: %s", memory_id, exc)
+            return False
+
+    def decay_all(
+        self,
+        days_threshold: int = 7,
+        decay_amount: float = 0.05,
+        min_strength: float = 0.3,
+    ) -> int:
+        """Decay strength for memories not accessed in N days.
+
+        For rows where last_accessed_at is NULL, created_at is used.
+        Returns number of rows updated.
+        """
+        conn = self._get_conn()
+        now = time.time()
+        cutoff = now - (days_threshold * 86400.0)
+        try:
+            cur = conn.execute(
+                """
+                UPDATE memories
+                   SET strength = MAX(COALESCE(strength, 1.0) - ?, ?)
+                 WHERE deleted_at IS NULL
+                   AND COALESCE(last_accessed_at, created_at) < ?
+                   AND COALESCE(strength, 1.0) > ?
+                """,
+                (decay_amount, min_strength, cutoff, min_strength),
+            )
+            conn.commit()
+            decayed = int(cur.rowcount or 0)
+            logger.info(
+                "Decay run: decayed=%d (threshold_days=%d amount=%.4f min=%.2f)",
+                decayed,
+                days_threshold,
+                decay_amount,
+                min_strength,
+            )
+            return decayed
+        except Exception as exc:
+            logger.exception("decay_all failed: %s", exc)
+            return 0
+
+    # ------------------------------------------------------------------
+    # Write-time semantic merge
+    # ------------------------------------------------------------------
+
+    def merge_or_store(
+        self,
+        text: str,
+        vector: Optional[List[float]],
+        category: str,
+        importance: float,
+        source_session: Optional[str],
+        similarity_threshold: float = 0.85,
+    ) -> Dict[str, Any]:
+        """Store a memory, merging into nearest neighbor when highly similar.
+
+        If *vector* is provided, we search the nearest neighbor via sqlite-vec.
+        If similarity > threshold AND category matches, we merge content and
+        average embeddings.
+        """
+        conn = self._get_conn()
+        now = time.time()
+
+        if vector is None:
+            mid = self.store_memory(
+                text=text,
+                vector=None,
+                category=category,
+                importance=importance,
+                source_session=source_session,
+            )
+            return {"action": "inserted", "id": mid, "similarity": None}
+
+        try:
+            nn = self.search_vectors(vector, limit=1, min_score=0.0)
+        except Exception as exc:
+            logger.warning("merge_or_store: vector search failed; inserting: %s", exc)
+            mid = self.store_memory(
+                text=text,
+                vector=vector,
+                category=category,
+                importance=importance,
+                source_session=source_session,
+            )
+            return {"action": "inserted", "id": mid, "similarity": None}
+
+        if not nn:
+            mid = self.store_memory(
+                text=text,
+                vector=vector,
+                category=category,
+                importance=importance,
+                source_session=source_session,
+            )
+            return {"action": "inserted", "id": mid, "similarity": None}
+
+        best = nn[0]
+        best_id = best.get("id")
+        similarity = float(best.get("score") or 0.0)
+
+        if (
+            best_id
+            and similarity >= similarity_threshold
+            and (best.get("category") or "other") == category
+            and best.get("deleted_at") is None
+        ):
+            old_text = (best.get("text") or "").rstrip()
+            new_text = text.strip()
+            merged_text = f"{old_text}\n• {new_text}" if old_text else new_text
+
+            # Average embeddings (old + new)
+            vec_rowid = best.get("vector_rowid")
+            if vec_rowid is not None:
+                row = conn.execute(
+                    "SELECT embedding FROM memory_vectors WHERE rowid = ?", (vec_rowid,)
+                ).fetchone()
+                if row and row[0] is not None:
+                    try:
+                        old_vec = np.frombuffer(row[0], dtype=np.float32)
+                        new_vec = np.asarray(vector, dtype=np.float32)
+                        if old_vec.shape == new_vec.shape:
+                            avg_vec = ((old_vec + new_vec) / 2.0).astype(np.float32)
+                            conn.execute(
+                                "UPDATE memory_vectors SET embedding = ? WHERE rowid = ?",
+                                (avg_vec.tobytes(), vec_rowid),
+                            )
+                    except Exception:
+                        pass
+
+            # Merge text + metadata
+            conn.execute(
+                """
+                UPDATE memories
+                   SET text = ?,
+                       importance = MAX(COALESCE(importance, 0.5), ?),
+                       updated_at = ?,
+                       strength = MIN(COALESCE(strength, 1.0) + 0.2, 5.0),
+                       last_accessed_at = ?
+                 WHERE id = ?
+                """,
+                (merged_text, importance, now, now, best_id),
+            )
+            conn.execute("DELETE FROM memory_fts WHERE id = ?", (best_id,))
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_fts(id, text) VALUES (?, ?)",
+                (best_id, merged_text),
+            )
+            conn.commit()
+
+            logger.info(
+                "merge_or_store: merged into %s (sim=%.4f cat=%s)",
+                best_id,
+                similarity,
+                category,
+            )
+            return {"action": "merged", "id": best_id, "similarity": similarity}
+
+        mid = self.store_memory(
+            text=text,
+            vector=vector,
+            category=category,
+            importance=importance,
+            source_session=source_session,
+        )
+        return {"action": "inserted", "id": mid, "similarity": similarity}
+
+    # ------------------------------------------------------------------
     # Batch operations
     # ------------------------------------------------------------------
 
@@ -341,9 +572,10 @@ class MemoryStorage:
                 conn.execute(
                     """INSERT OR REPLACE INTO memories
                        (id, text, category, importance, source_session,
-                        created_at, updated_at, vector_rowid)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (mid, text, category, importance, source, now, now, vector_rowid),
+                        created_at, updated_at, vector_rowid,
+                        strength, last_accessed_at, deleted_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                    (mid, text, category, importance, source, now, now, vector_rowid, 1.0, now),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO memory_fts(id, text) VALUES (?, ?)",
@@ -396,7 +628,8 @@ class MemoryStorage:
             if similarity < min_score:
                 continue
             mem = conn.execute(
-                "SELECT * FROM memories WHERE vector_rowid = ?", (r["vec_rowid"],)
+                "SELECT * FROM memories WHERE vector_rowid = ? AND deleted_at IS NULL",
+                (r["vec_rowid"],),
             ).fetchone()
             if mem:
                 d = dict(mem)
@@ -436,7 +669,7 @@ class MemoryStorage:
         results: List[Dict[str, Any]] = []
         for r in rows:
             mem = conn.execute(
-                "SELECT * FROM memories WHERE id = ?", (r["id"],)
+                "SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL", (r["id"],)
             ).fetchone()
             if mem:
                 d = dict(mem)

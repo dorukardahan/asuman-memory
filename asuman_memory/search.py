@@ -1,9 +1,10 @@
 """Hybrid search with Reciprocal Rank Fusion (RRF).
 
-Three-layer search:
-1. **Semantic** — sqlite-vec cosine similarity (weight 0.50)
-2. **Keyword**  — FTS5 BM25 ranking (weight 0.30)
-3. **Recency**  — Exponential decay (weight 0.20)
+Four-layer search:
+1. **Semantic** — sqlite-vec cosine similarity (weight 0.40)
+2. **Keyword**  — FTS5 BM25 ranking (weight 0.25)
+3. **Recency**  — Exponential decay (weight 0.15)
+4. **Strength** — Ebbinghaus retention score (weight 0.20)
 
 Results from each layer are fused via RRF:
     ``score = Σ 1 / (k + rank_i)``  where k = 60
@@ -29,9 +30,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SearchWeights:
     """Configurable weights for each search layer."""
-    semantic: float = 0.50
-    keyword: float = 0.30
-    recency: float = 0.20
+    semantic: float = 0.40
+    keyword: float = 0.25
+    recency: float = 0.15
+    strength: float = 0.20
 
 
 @dataclass
@@ -46,6 +48,7 @@ class SearchResult:
     semantic_score: float = 0.0
     keyword_score: float = 0.0
     recency_score: float = 0.0
+    strength_score: float = 0.0
     confidence_tier: str = "LOW"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -59,6 +62,7 @@ class SearchResult:
             "semantic_score": round(self.semantic_score, 4),
             "keyword_score": round(self.keyword_score, 4),
             "recency_score": round(self.recency_score, 4),
+            "strength_score": round(self.strength_score, 4),
             "confidence_tier": self.confidence_tier,
         }
 
@@ -67,6 +71,19 @@ def _recency_score(created_at: float, decay_rate: float = 0.01) -> float:
     """Exponential decay: ``exp(-decay_rate * days_old)``."""
     days_old = max(0.0, (time.time() - created_at) / 86400.0)
     return math.exp(-decay_rate * days_old)
+
+
+def _strength_score(last_accessed_at: float, strength: float) -> float:
+    """Ebbinghaus retention score: exp(-days_since_access / strength)."""
+    try:
+        s = float(strength or 1.0)
+        if s <= 0:
+            s = 1.0
+    except Exception:
+        s = 1.0
+
+    days = max(0.0, (time.time() - float(last_accessed_at)) / 86400.0)
+    return math.exp(-days / s)
 
 
 def _rrf_fuse(
@@ -156,6 +173,15 @@ class HybridSearch:
             reverse=True,
         )
 
+        # Layer 4 — Strength: rank by Ebbinghaus retention
+        strength_scored: List[tuple[str, float]] = []
+        for mid, cand in all_candidates.items():
+            last_acc = cand.get("last_accessed_at") or cand.get("created_at") or 0.0
+            st = cand.get("strength") or 1.0
+            strength_scored.append((mid, _strength_score(float(last_acc), float(st))))
+        strength_ranked = [mid for mid, _ in sorted(strength_scored, key=lambda x: x[1], reverse=True)]
+        strength_map = {mid: sc for mid, sc in strength_scored}
+
         # RRF fusion ----------------------------------------------------------
         ranked_lists: List[List[str]] = []
         weights_list: List[float] = []
@@ -169,6 +195,9 @@ class HybridSearch:
         if use_recency and recency_ranked:
             ranked_lists.append(recency_ranked)
             weights_list.append(self.weights.recency)
+        if strength_ranked:
+            ranked_lists.append(strength_ranked)
+            weights_list.append(self.weights.strength)
 
         if not ranked_lists:
             return []
@@ -198,8 +227,16 @@ class HybridSearch:
                 semantic_score=cand.get("_sem_score", 0.0),
                 keyword_score=0.0,  # BM25 rank-based, not a similarity
                 recency_score=_recency_score(cand.get("created_at", 0.0)),
+                strength_score=float(strength_map.get(mid, 0.0)),
                 confidence_tier=get_confidence_tier(score / 0.02),  # normalise to ~1
             )
             results.append(sr)
+
+        # Spaced repetition: boost strength on top hits
+        for r in results[:3]:
+            try:
+                self.storage.boost_strength(r.id)
+            except Exception:
+                pass
 
         return results
