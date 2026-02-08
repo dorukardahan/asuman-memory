@@ -1,4 +1,4 @@
-"""Shared fixtures for Asuman Memory tests."""
+"""Shared fixtures for OpenClaw Memory tests."""
 
 from __future__ import annotations
 

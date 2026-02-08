@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bulk-index all existing JSONL sessions into the Asuman memory database.
+"""Bulk-index all existing JSONL sessions into the memory database.
 
 Usage:
     python scripts/initial_load.py [--sessions-dir PATH] [--db PATH]
@@ -36,7 +36,7 @@ def _progress(done: int, total: int) -> None:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Bulk-index sessions into Asuman memory")
+    parser = argparse.ArgumentParser(description="Bulk-index sessions into memory")
     parser.add_argument("--sessions-dir", help="Override sessions directory")
     parser.add_argument("--db", help="Override database path")
     parser.add_argument("--batch-size", type=int, default=50, help="Embedding batch size")
@@ -75,7 +75,7 @@ async def main() -> None:
         sessions = sessions[:args.limit]
 
     print("=" * 60)
-    print("  Asuman Memory — Initial Data Load")
+    print("  OpenClaw Memory — Initial Data Load")
     print("=" * 60)
     print(f"  Sessions dir: {sessions_dir}")
     print(f"  Session files: {len(sessions)}")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Incremental sync of OpenClaw sessions into Asuman memory.
+"""Incremental sync of OpenClaw sessions into memory.
 
 Designed to run periodically (via cron or OpenClaw scheduler).
 Tracks sync state in a JSON file and only processes new/modified sessions.
@@ -231,7 +231,7 @@ def show_status() -> None:
     """Show current sync state."""
     state = _load_state()
     print("=" * 50)
-    print("  Asuman Memory — Sync Status")
+    print("  OpenClaw Memory — Sync Status")
     print("=" * 50)
     print(f"  Last sync:      {state.get('last_sync', 'never')}")
     print(f"  Sync count:     {state.get('sync_count', 0)}")
