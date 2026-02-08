@@ -73,7 +73,17 @@ async def lifespan(app: FastAPI):
         logger.warning("No OPENROUTER_API_KEY — semantic search disabled")
         _embedder = None
 
-    _search = HybridSearch(storage=_storage, embedder=_embedder)
+    from .search import SearchWeights
+    _search = HybridSearch(
+        storage=_storage,
+        embedder=_embedder,
+        weights=SearchWeights(
+            semantic=_config.weight_semantic,
+            keyword=_config.weight_keyword,
+            recency=_config.weight_recency,
+            strength=_config.weight_strength,
+        ),
+    )
     _kg = KnowledgeGraph(storage=_storage)
     _start_time = time.time()
 

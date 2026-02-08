@@ -2,9 +2,9 @@
 
 A local-first conversational memory system that gives OpenClaw agents long-term recall across sessions.
 
-- **Single SQLite file** (portable, backup-friendly)
-- **Hybrid search** for recall (semantic + keyword + recency + strength)
-- **Zero cloud dependency** for storage and retrieval (embeddings are the only external call)
+- **Single SQLite file** — portable, backup-friendly, no Docker needed
+- **4-layer hybrid search** with RRF fusion (semantic + keyword + recency + Ebbinghaus strength)
+- **Zero cloud dependency** for storage and retrieval (embeddings via OpenRouter are the only external call)
 
 ## Key Features
 
@@ -22,42 +22,31 @@ A local-first conversational memory system that gives OpenClaw agents long-term 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                       FastAPI  (:8787)                             │
-│  /v1/recall  /v1/capture  /v1/store  /v1/forget  /v1/search        │
-│  /v1/stats   /v1/health   /v1/decay  /v1/consolidate               │
-└──────────┬───────────────┬───────────────┬────────────────────────┘
-           │               │               │
-     ┌─────▼─────┐   ┌────▼─────┐   ┌────▼────────┐
-     │  Hybrid   │   │  Ingest  │   │  Knowledge   │
-     │  Search   │   │  JSONL   │   │   Graph      │
-     │ (RRF Fuse)│   │ (auto)   │   │ (entities)   │
-     └──┬──┬──┬──┘   └────┬─────┘   └────┬─────────┘
-        │  │  │           │              │
-   ┌────▼┐ │ ┌▼────┐  ┌──▼──────────────▼──┐
-   │Vec  │ │ │FTS5 │  │       SQLite         │
-   │Srch │ │ │BM25 │  │  memories + vectors  │
-   └──┬──┘ │ └──┬──┘  │  fts + entities/KG   │
-      │    │    │     └─────────┬────────────┘
-      │    │    │               │
-      │    │    │         ┌─────▼─────┐
-      │    │    └────────►│ Recency   │
-      │    │              │  scoring  │
-      │    │              └───────────┘
-      │    │
-      │    │              ┌───────────┐
-      │    └─────────────►│ Strength  │
-      │                   │ (decay +  │
-      └──────────────────►│ boost)    │
-                          └───────────┘
-
-         sqlite-vec + FTS5 + strength/decay
-         single .sqlite database file
+┌──────────────────────────────────────────────────────────────────┐
+│                      FastAPI  (:8787)                            │
+│  /v1/recall  /v1/capture  /v1/store   /v1/forget  /v1/search    │
+│  /v1/stats   /v1/health   /v1/decay   /v1/consolidate           │
+└──────────┬──────────────┬──────────────┬─────────────────────────┘
+           │              │              │
+     ┌─────▼──────┐ ┌────▼─────┐  ┌─────▼───────┐
+     │  4-Layer   │ │  Ingest  │  │  Knowledge  │
+     │  Hybrid    │ │  (JSONL  │  │   Graph     │
+     │  Search    │ │  parser) │  │ (entities)  │
+     │            │ └────┬─────┘  └─────┬───────┘
+     │ ┌────────┐ │      │              │
+     │ │Semantic│ │      │              │
+     │ │Keyword │ │ ┌────▼──────────────▼───┐
+     │ │Recency │ │ │        SQLite          │
+     │ │Strength│ │ │  memories + vectors    │
+     │ └───┬────┘ │ │  fts5 + entities/KG   │
+     │     │RRF   │ │  strength + decay      │
+     └─────┼──────┘ └──────────┬────────────┘
+           │                   │
+           └───────────────────┘
 
    ┌──────────────┐
-   │ OpenRouter    │
-   │ Embeddings    │
-   │ (optional)    │
+   │  OpenRouter   │  (only external dependency)
+   │  Embeddings   │  qwen3-embedding-8b / 4096d
    └──────────────┘
 ```
 
