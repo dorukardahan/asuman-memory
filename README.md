@@ -13,6 +13,42 @@ Your agent remembers conversations, decisions, and facts across sessions — wit
 - **Multi-agent** — each agent gets its own DB; cross-agent search with `agent=all`
 - **Multilingual NLP** — Turkish + English lemmatization, temporal parsing, stopword filtering
 
+## Why Not Just Use Files?
+
+Most agent frameworks (OpenClaw, Claude Code, etc.) ship with a built-in memory layer — typically keyword search over markdown files like `MEMORY.md`. That works for curated notes you write by hand, but it has limits:
+
+| | File-based memory | Agent Memory (this) |
+|---|---|---|
+| Search | Keyword / text match | Semantic + keyword + recency + strength |
+| Data | Hand-written notes | Auto-ingested conversations |
+| Dedup | Manual | Automatic (cosine merge) |
+| Recall quality | Exact match or miss | Finds related context even with different wording |
+| Maintenance | You prune files | Spaced repetition + decay handle it |
+| Multi-agent | Shared files or nothing | Per-agent DBs with cross-search |
+
+**The two layers complement each other.** File-based memory holds curated, high-signal notes. Agent Memory holds everything — the full conversation history with intelligent retrieval.
+
+### Dual Memory Architecture (OpenClaw example)
+
+```
+Your Agent
+├── Built-in memory (MEMORY.md, memory/*.md)
+│   └── Keyword search over hand-written notes
+│   └── "What did I explicitly decide?"
+│
+├── Agent Memory API (this repo, port 8787)
+│   └── 4-layer hybrid search over all conversations
+│   └── "What was discussed 3 weeks ago about deployments?"
+│
+└── Hooks (glue between them)
+    ├── bootstrap-context  → pull recent memories at session start
+    ├── pre-session-save   → snapshot context before session ends
+    ├── post-compaction    → restore context after token compaction
+    └── session-bridge     → track topics across sessions
+```
+
+You don't need to pick one. Run both — Agent Memory catches what you'd never think to write down.
+
 ## Quick Start
 
 ```bash
@@ -111,6 +147,55 @@ Four scoring layers, fused with Reciprocal Rank Fusion (RRF):
 
 Weights are configurable via environment or JSON config overlay.
 
+## Hooks (OpenClaw Integration)
+
+Hooks let the memory API plug into your agent's lifecycle automatically. No manual recall needed — the agent gets context injected at the right moments.
+
+### bootstrap-context
+
+Runs at session start. Pulls recent memories and injects them as context so the agent "remembers" without being asked.
+
+```js
+// hooks/bootstrap-context/handler.js
+// Derives agent ID from workspace path, fetches /v1/recall
+// Injects top memories into session bootstrap
+```
+
+### pre-session-save
+
+Runs before a session ends or is compacted. Stores a snapshot of the current context so nothing is lost.
+
+### post-compaction-restore
+
+After token compaction (when context gets too long and is summarized), this hook restores critical context that the compaction summary might have dropped.
+
+### session-memory-bridge
+
+Tracks active topics across sessions. If you discussed "deployment pipeline" in session A, session B will know it's a hot topic even without explicit recall.
+
+### Hook Setup (OpenClaw)
+
+Add hook directories to your config:
+
+```json
+{
+  "hooks": {
+    "internal": {
+      "load": {
+        "extraDirs": [
+          "/path/to/hooks/bootstrap-context",
+          "/path/to/hooks/pre-session-save",
+          "/path/to/hooks/post-compaction-restore",
+          "/path/to/hooks/session-memory-bridge"
+        ]
+      }
+    }
+  }
+}
+```
+
+Example hook implementations are in the `hooks/` directory (coming soon — currently deployed but not yet in repo).
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -139,15 +224,49 @@ Override search weights and batch size without changing code:
 }
 ```
 
-## OpenClaw Integration
+## Embedding Models
 
-### Session Sync (cron)
+You need an embedding model for semantic search. Two options:
 
-Auto-ingest OpenClaw session transcripts:
+### Cloud (OpenRouter)
 
-```cron
-*/30 * * * * /path/to/whatsapp-memory/scripts/cron_sync.sh
+Zero setup, works on any machine. ~$0.01/1M tokens.
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+export AGENT_MEMORY_MODEL="qwen/qwen3-embedding-8b"
+export AGENT_MEMORY_DIMENSIONS=4096
 ```
+
+### Local (llama-server)
+
+No API costs, no network dependency. Needs ~4GB RAM for a quantized 4B model.
+
+```bash
+# Download a quantized embedding model (example: Qwen3-Embedding-4B Q8)
+llama-server -m qwen3-embedding-4b-q8.gguf \
+  --port 8090 --embedding --n-gpu-layers 0
+
+# Point Agent Memory at it
+export AGENT_MEMORY_EMBEDDING_URL="http://localhost:8090/v1/embeddings"
+export AGENT_MEMORY_MODEL="local"
+export AGENT_MEMORY_DIMENSIONS=2560  # depends on your model
+```
+
+**Choosing a model:**
+
+| Model | RAM | Dimensions | Speed | Quality |
+|---|---|---|---|---|
+| Qwen3-Embedding-0.6B (Q8) | ~1 GB | 1024 | Fast | Good for small DBs |
+| Qwen3-Embedding-4B (Q8) | ~4 GB | 2560 | Moderate | Good balance |
+| Qwen3-Embedding-8B (cloud) | — | 4096 | Fast (API) | Best quality |
+
+If you switch models, re-embed your existing memories:
+```bash
+python scripts/reindex_embeddings.py
+```
+
+## Deployment
 
 ### Systemd Service
 
@@ -165,6 +284,14 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
+```
+
+### Session Sync (cron)
+
+Auto-ingest OpenClaw session transcripts:
+
+```cron
+*/30 * * * * /path/to/whatsapp-memory/scripts/cron_sync.sh
 ```
 
 ### Agent TOOLS.md Snippet
