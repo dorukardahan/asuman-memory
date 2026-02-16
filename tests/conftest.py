@@ -6,9 +6,9 @@ from typing import List
 
 import pytest
 
-from asuman_memory.storage import MemoryStorage
-from asuman_memory.entities import EntityExtractor, KnowledgeGraph
-from asuman_memory.search import HybridSearch
+from agent_memory.storage import MemoryStorage
+from agent_memory.entities import EntityExtractor, KnowledgeGraph
+from agent_memory.search import HybridSearch
 
 
 # ---------------------------------------------------------------------------

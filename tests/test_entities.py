@@ -2,7 +2,7 @@
 
 import pytest
 
-from asuman_memory.entities import (
+from agent_memory.entities import (
     Entity,
     EntityExtractor,
     ExtractedEntities,
@@ -105,8 +105,8 @@ class TestDedup:
 
     def test_no_dedup_different_names(self):
         entities = [
-            Entity(text="User", label="person"),
-            Entity(text="Asuman", label="person"),
+            Entity(text="Alice", label="person"),
+            Entity(text="Bob", label="person"),
         ]
         result = _dedupe(entities)
         assert len(result) == 2
@@ -145,7 +145,7 @@ class TestKnowledgeGraph:
         assert entities[0]["mention_count"] >= 2
 
     def test_co_occurrence_linking(self, knowledge_graph, tmp_storage):
-        knowledge_graph.process_text("User ve Asuman Python projesi yapıyor")
+        knowledge_graph.process_text("Alice ve Bob Python projesi yapıyor")
         stats = tmp_storage.stats()
         # Should have relationships between co-occurring entities
         assert stats["entities"] >= 2

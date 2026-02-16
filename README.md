@@ -188,22 +188,22 @@ curl -X POST http://localhost:8787/v1/consolidate
 
 ## Configuration
 
-Environment variables keep the historical `ASUMAN_MEMORY_*` prefix for compatibility.
+Environment variables keep the historical `AGENT_MEMORY_*` prefix for compatibility.
 
 | Variable | Default | Description |
 |---|---:|---|
 | `OPENROUTER_API_KEY` | *(required for semantic search)* | OpenRouter API key used for embeddings |
-| `ASUMAN_MEMORY_DB` | `~/.asuman/memory.sqlite` | SQLite database path |
-| `ASUMAN_MEMORY_MODEL` | `qwen/qwen3-embedding-8b` | Embedding model name |
-| `ASUMAN_MEMORY_DIMENSIONS` | `4096` | Vector dimensions |
-| `ASUMAN_MEMORY_HOST` | `127.0.0.1` | API bind address |
-| `ASUMAN_MEMORY_PORT` | `8787` | API server port |
-| `ASUMAN_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session JSONL directory |
-| `ASUMAN_MEMORY_CONFIG` | *(none)* | Optional JSON config overlay file |
+| `AGENT_MEMORY_DB` | `~/.agent-memory/memory.sqlite` | SQLite database path |
+| `AGENT_MEMORY_MODEL` | `qwen/qwen3-embedding-8b` | Embedding model name |
+| `AGENT_MEMORY_DIMENSIONS` | `4096` | Vector dimensions |
+| `AGENT_MEMORY_HOST` | `127.0.0.1` | API bind address |
+| `AGENT_MEMORY_PORT` | `8787` | API server port |
+| `AGENT_MEMORY_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session JSONL directory |
+| `AGENT_MEMORY_CONFIG` | *(none)* | Optional JSON config overlay file |
 
 ### JSON config overlay
 
-Set `ASUMAN_MEMORY_CONFIG=/path/to/config.json` to override any `Config` field.
+Set `AGENT_MEMORY_CONFIG=/path/to/config.json` to override any `Config` field.
 
 ```json
 {
@@ -223,7 +223,7 @@ cd whatsapp-memory
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export OPENROUTER_API_KEY="sk-or-..."
-python -m asuman_memory
+python -m agent_memory
 ```
 
 Health check:
@@ -258,7 +258,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/path/to/whatsapp-memory
 Environment=OPENROUTER_API_KEY=sk-or-...
-ExecStart=/path/to/whatsapp-memory/.venv/bin/python -m asuman_memory
+ExecStart=/path/to/whatsapp-memory/.venv/bin/python -m agent_memory
 Restart=always
 
 [Install]

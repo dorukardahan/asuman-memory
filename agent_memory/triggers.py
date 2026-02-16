@@ -1,7 +1,7 @@
 """Trigger patterns and importance scoring.
 
 Ported from Mahmory v6 ``memory_skill.py`` / ``importance.py``, cleaned up
-and adapted for Asuman's Turkish+English environment.
+and adapted for Turkish+English environment.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ TURKISH_TRIGGERS: List[str] = [
     r"söylemiştim", r"soylemistim",
     # Decision / preference
     r"karar",
-    r"sevdiğim", r"sevmediğim",
+    r"sevdiğim", r"sevdigim", r"sevmediğim", r"sevmedigim",
     r"unutma",
     r"her\s*zaman", r"asla",
     # Identity
@@ -70,7 +70,7 @@ ANTI_TRIGGER_PATTERNS: List[str] = [
 
 # Past-tense heuristic (Turkish + English)
 _PAST_TENSE_RE = re.compile(
-    r"(?:mıştı|mişti|muştu|müştü|dık|dik|duk|dük|aldı|yaptı|gitti|geldi|söyledi"
+    r"(?:mıştı|misti|mişti|muştu|mustu|müştü|dık|dik|duk|dük|aldı|aldi|yaptı|yapti|gitti|geldi|söyledi|soyledi"
     r"|was|were|did|had)",
     re.IGNORECASE,
 )
@@ -134,14 +134,14 @@ _IMPORTANCE_MARKERS: List[str] = [
 ]
 
 _DECISION_MARKERS: List[str] = [
-    "karar", "kararlaştırdık", "yapacağım", "yapacağız",
-    "söz", "tamamdır", "anlaştık", "kabul",
+    "karar", "kararlaştırdık", "kararlastirdik", "yapacağım", "yapacagim", "yapacağız", "yapacagiz",
+    "söz", "soz", "tamamdır", "tamamdir", "anlaştık", "anlastik", "kabul",
     "decided", "will do", "agreed", "commitment",
     "plan is", "going to", "promise", "deal",
 ]
 
 _TASK_MARKERS: List[str] = [
-    "todo", "yapılacak", "görev", "task",
+    "todo", "yapılacak", "yapilacak", "görev", "gorev", "task",
     "action item", "next step",
 ]
 

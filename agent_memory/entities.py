@@ -23,6 +23,12 @@ from typing import Any, Dict, List, Optional, Set
 
 from .storage import MemoryStorage
 
+try:
+    from rapidfuzz import fuzz, process as rfprocess
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    HAS_RAPIDFUZZ = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,7 +77,7 @@ class ExtractedEntities:
 # ---------------------------------------------------------------------------
 
 KNOWN_PEOPLE: Set[str] = {
-    "user", "asuman",
+    # Add your known people here, e.g.: "alice", "bob"
 }
 
 KNOWN_PLACES: Set[str] = {
@@ -91,6 +97,41 @@ KNOWN_TECH: Set[str] = {
     "whatsapp", "telegram", "discord", "fastapi", "uvicorn",
     "docker", "kubernetes", "linux", "git", "github",
 }
+
+# ---------------------------------------------------------------------------
+# Entity aliases — informal names → canonical names
+# ---------------------------------------------------------------------------
+
+ENTITY_ALIASES: Dict[str, str] = {
+    # Customize with your own aliases → canonical names, e.g.:
+    # "boss": "Alice",
+    # "oc": "OpenClaw",
+    # "wp": "WhatsApp",
+}
+
+
+def resolve_alias(name: str, threshold: int = 80) -> str:
+    """Resolve an informal name to its canonical form.
+
+    Uses exact alias lookup first, then rapidfuzz fuzzy matching.
+    Returns the canonical name if found, otherwise the original name.
+    """
+    name_lower = name.lower().strip()
+
+    # Exact alias match
+    if name_lower in ENTITY_ALIASES:
+        return ENTITY_ALIASES[name_lower]
+
+    # Fuzzy match against alias keys
+    if HAS_RAPIDFUZZ and len(name_lower) >= 3:
+        alias_keys = list(ENTITY_ALIASES.keys())
+        match = rfprocess.extractOne(
+            name_lower, alias_keys, scorer=fuzz.ratio, score_cutoff=threshold
+        )
+        if match:
+            return ENTITY_ALIASES[match[0]]
+
+    return name
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -299,11 +340,12 @@ class KnowledgeGraph:
         entities = self.extractor.extract(text, source, timestamp)
         all_ents = entities.all_entities()
 
-        # Store each entity
+        # Store each entity (resolve aliases to canonical names)
         entity_ids: list[str] = []
         for ent in all_ents:
+            canonical_name = resolve_alias(ent.text)
             eid = self.storage.store_entity(
-                name=ent.text,
+                name=canonical_name,
                 entity_type=ent.label,
             )
             entity_ids.append(eid)
@@ -323,5 +365,10 @@ class KnowledgeGraph:
         return entities
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search entities by name."""
-        return self.storage.search_entities(query, limit)
+        """Search entities by name, with alias resolution."""
+        canonical = resolve_alias(query)
+        results = self.storage.search_entities(canonical, limit)
+        # If alias resolved to different name and no results, try original
+        if not results and canonical != query:
+            results = self.storage.search_entities(query, limit)
+        return results

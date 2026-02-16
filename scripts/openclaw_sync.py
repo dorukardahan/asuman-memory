@@ -26,16 +26,16 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from asuman_memory.config import load_config
-from asuman_memory.embeddings import OpenRouterEmbeddings
-from asuman_memory.entities import KnowledgeGraph
-from asuman_memory.ingest import discover_sessions, parse_session_file
-from asuman_memory.storage import MemoryStorage
-from asuman_memory.triggers import score_importance
+from agent_memory.config import load_config
+from agent_memory.embeddings import OpenRouterEmbeddings
+from agent_memory.entities import KnowledgeGraph
+from agent_memory.ingest import discover_sessions, parse_session_file
+from agent_memory.storage import MemoryStorage
+from agent_memory.triggers import score_importance
 
 logger = logging.getLogger("openclaw_sync")
 
-STATE_FILE = Path.home() / ".asuman" / "sync_state.json"
+STATE_FILE = Path.home() / ".agent-memory" / "sync_state.json"
 
 
 def _load_state() -> Dict[str, Any]:

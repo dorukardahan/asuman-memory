@@ -1,17 +1,23 @@
 """FastAPI HTTP API for the OpenClaw memory system.
 
 Endpoints:
-    POST   /v1/recall        — Hybrid search (semantic + BM25 + recency + strength)
-    POST   /v1/capture       — Batch ingest (write-time semantic merge)
-    POST   /v1/store         — Store one memory (write-time semantic merge)
-    DELETE /v1/forget        — Delete memory
-    GET    /v1/search        — Interactive search
-    GET    /v1/stats         — Statistics
-    GET    /v1/health        — Health check
-    POST   /v1/decay         — Run Ebbinghaus strength decay
-    POST   /v1/consolidate   — Deduplicate + archive stale memories
+    POST   /v1/recall        -- Hybrid search (semantic + BM25 + recency + strength)
+    POST   /v1/capture       -- Batch ingest (write-time semantic merge)
+    POST   /v1/store         -- Store one memory (write-time semantic merge)
+    DELETE /v1/forget        -- Delete memory
+    GET    /v1/search        -- Interactive search
+    GET    /v1/stats         -- Statistics
+    GET    /v1/health        -- Health check
+    GET    /v1/agents        -- List known agent memory databases
+    POST   /v1/decay         -- Run Ebbinghaus strength decay
+    POST   /v1/consolidate   -- Deduplicate + archive stale memories
 
-Run: ``python -m asuman_memory.api``
+All endpoints accept an optional ``agent`` parameter for per-agent DB routing:
+    - None / "main"  -> main memory database (default, backward compatible)
+    - "{agent_id}"   -> agent-specific database (memory-{agent_id}.sqlite)
+    - "all"          -> cross-agent search (recall/search/stats/decay/consolidate only)
+
+Run: ``python -m agent_memory.api``
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import logging
 import sqlite3
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -30,7 +37,8 @@ from pydantic import BaseModel, Field
 from .config import Config, load_config
 from .embeddings import OpenRouterEmbeddings
 from .entities import KnowledgeGraph
-from .search import HybridSearch, SearchResult
+from .pool import StoragePool
+from .search import HybridSearch, SearchResult, SearchWeights
 from .storage import MemoryStorage
 from .triggers import get_confidence_tier, score_importance, should_trigger
 
@@ -40,28 +48,78 @@ logger = logging.getLogger(__name__)
 # Shared state (initialised in lifespan)
 # ---------------------------------------------------------------------------
 
-_storage: Optional[MemoryStorage] = None
+_storage_pool: Optional[StoragePool] = None
 _embedder: Optional[OpenRouterEmbeddings] = None
-_search: Optional[HybridSearch] = None
-_kg: Optional[KnowledgeGraph] = None
 _config: Optional[Config] = None
 _start_time: float = 0.0
 
+# Per-agent caches (lazily populated)
+_search_cache: Dict[str, HybridSearch] = {}
+_kg_cache: Dict[str, KnowledgeGraph] = {}
+_search_weights: Optional[SearchWeights] = None
+
+
+# ---------------------------------------------------------------------------
+# Agent routing helpers
+# ---------------------------------------------------------------------------
+
+def _get_storage(agent: Optional[str] = None) -> MemoryStorage:
+    """Get the MemoryStorage for the given agent."""
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+    return _storage_pool.get(agent)
+
+
+def _get_search(agent: Optional[str] = None) -> HybridSearch:
+    """Get or create a HybridSearch for the given agent."""
+    if _storage_pool is None or _search_weights is None:
+        raise HTTPException(503, "Search not initialised")
+    key = StoragePool.normalize_key(agent)
+    if key not in _search_cache:
+        storage = _storage_pool.get(agent)
+        _search_cache[key] = HybridSearch(
+            storage=storage,
+            embedder=_embedder,
+            weights=_search_weights,
+        )
+    return _search_cache[key]
+
+
+def _get_kg(agent: Optional[str] = None) -> KnowledgeGraph:
+    """Get or create a KnowledgeGraph for the given agent."""
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage not initialised")
+    key = StoragePool.normalize_key(agent)
+    if key not in _kg_cache:
+        storage = _storage_pool.get(agent)
+        _kg_cache[key] = KnowledgeGraph(storage=storage)
+    return _kg_cache[key]
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic."""
-    global _storage, _embedder, _search, _kg, _config, _start_time
+    global _storage_pool, _embedder, _config, _start_time, _search_weights
 
     _config = load_config()
     errors = _config.validate()
     if errors:
         logger.warning("Config validation warnings: %s", errors)
 
-    _storage = MemoryStorage(
-        db_path=_config.db_path,
+    # Derive base directory from db_path's parent
+    base_dir = str(Path(_config.db_path).parent)
+
+    _storage_pool = StoragePool(
+        base_dir=base_dir,
         dimensions=_config.embedding_dimensions,
     )
+
+    # Pre-open main storage to ensure schema exists
+    _storage_pool.get("main")
 
     if _config.openrouter_api_key:
         _embedder = OpenRouterEmbeddings(
@@ -70,38 +128,33 @@ async def lifespan(app: FastAPI):
             dimensions=_config.embedding_dimensions,
         )
     else:
-        logger.warning("No OPENROUTER_API_KEY — semantic search disabled")
+        logger.warning("No OPENROUTER_API_KEY -- semantic search disabled")
         _embedder = None
 
-    from .search import SearchWeights
-    _search = HybridSearch(
-        storage=_storage,
-        embedder=_embedder,
-        weights=SearchWeights(
-            semantic=_config.weight_semantic,
-            keyword=_config.weight_keyword,
-            recency=_config.weight_recency,
-            strength=_config.weight_strength,
-        ),
+    _search_weights = SearchWeights(
+        semantic=_config.weight_semantic,
+        keyword=_config.weight_keyword,
+        recency=_config.weight_recency,
+        strength=_config.weight_strength,
     )
-    _kg = KnowledgeGraph(storage=_storage)
-    _start_time = time.time()
 
+    agents = _storage_pool.get_all_agents()
     logger.info(
-        "Memory API ready — db=%s model=%s",
-        _config.db_path, _config.embedding_model,
+        "Memory API ready -- base_dir=%s agents=%s model=%s",
+        base_dir, agents, _config.embedding_model,
     )
 
     yield
 
     # Shutdown
-    if _storage:
-        _storage.close()
+    _storage_pool.close_all()
+    _search_cache.clear()
+    _kg_cache.clear()
 
 
 app = FastAPI(
     title="OpenClaw Memory API",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -114,21 +167,33 @@ class RecallRequest(BaseModel):
     query: str
     limit: int = Field(default=5, ge=1, le=50)
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    agent: Optional[str] = None
 
 
 class CaptureRequest(BaseModel):
     messages: List[Dict[str, Any]]
+    agent: Optional[str] = None
 
 
 class StoreRequest(BaseModel):
     text: str
     category: str = "other"
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    agent: Optional[str] = None
 
 
 class ForgetRequest(BaseModel):
     id: Optional[str] = None
     query: Optional[str] = None
+    agent: Optional[str] = None
+
+
+class DecayRequest(BaseModel):
+    agent: Optional[str] = None
+
+
+class ConsolidateRequest(BaseModel):
+    agent: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -137,21 +202,62 @@ class ForgetRequest(BaseModel):
 
 @app.post("/v1/recall")
 async def recall(req: RecallRequest) -> Dict[str, Any]:
-    """Search memories using hybrid search (semantic + BM25 + recency)."""
-    if _search is None:
-        raise HTTPException(503, "Search engine not initialised")
+    """Search memories using hybrid search (semantic + BM25 + recency).
 
-    results = await _search.search(
+    Use ``agent="all"`` to search across all agent databases.
+    """
+    if req.agent == "all":
+        return await _recall_all(req)
+
+    search = _get_search(req.agent)
+    results = await search.search(
         query=req.query,
         limit=req.limit,
         min_score=req.min_score,
     )
 
+    agent_key = StoragePool.normalize_key(req.agent)
     return {
         "query": req.query,
+        "agent": agent_key,
         "count": len(results),
         "triggered": should_trigger(req.query),
         "results": [r.to_dict() for r in results],
+    }
+
+
+async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
+    """Cross-agent recall: query all agent DBs, merge by score."""
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    all_results: List[Dict[str, Any]] = []
+    for agent_id in _storage_pool.get_all_agents():
+        try:
+            search = _get_search(agent_id)
+            results = await search.search(
+                query=req.query,
+                limit=req.limit,
+                min_score=req.min_score,
+            )
+            for r in results:
+                d = r.to_dict()
+                d["agent"] = agent_id
+                all_results.append(d)
+        except Exception as exc:
+            logger.warning("Cross-agent recall failed for %s: %s", agent_id, exc)
+
+    # Sort by score descending, take top N
+    all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    all_results = all_results[: req.limit]
+
+    return {
+        "query": req.query,
+        "agent": "all",
+        "count": len(all_results),
+        "triggered": should_trigger(req.query),
+        "results": all_results,
+        "cross_agent": True,
     }
 
 
@@ -160,18 +266,16 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
     """Ingest a batch of messages into memory.
 
     Each message dict should have at least ``text`` and ``role``.
-
-    Notes:
-      - Works even when the embedder is not configured (vectors stored as NULL).
-      - Uses a single embed_batch + store_memories_batch for efficiency.
     """
-    if _storage is None:
-        raise HTTPException(503, "Storage not initialised")
+    if req.agent == "all":
+        raise HTTPException(400, "Cannot capture to 'all' -- specify an agent")
+
+    storage = _get_storage(req.agent)
 
     # Pre-filter / normalize
     cleaned: List[Dict[str, Any]] = []
     for msg in req.messages:
-        text = (msg.get("text") or "").strip()
+        text = (msg.get("text") or msg.get("content") or "").strip()
         if len(text) < 3:
             continue
         role = msg.get("role", "user")
@@ -209,7 +313,7 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
     stored_n = 0
     merged_n = 0
     for it in items:
-        res = _storage.merge_or_store(
+        res = storage.merge_or_store(
             text=it["text"],
             vector=it.get("vector"),
             category=it.get("category", "other"),
@@ -222,21 +326,29 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
             stored_n += 1
 
     # Knowledge graph (best-effort)
-    if _kg:
-        for m in cleaned:
-            try:
-                _kg.process_text(m["text"], timestamp=m.get("timestamp", ""))
-            except Exception:
-                pass
+    kg = _get_kg(req.agent)
+    for m in cleaned:
+        try:
+            kg.process_text(m["text"], timestamp=m.get("timestamp", ""))
+        except Exception:
+            pass
 
-    return {"stored": stored_n, "merged": merged_n, "total": len(req.messages)}
+    agent_key = StoragePool.normalize_key(req.agent)
+    return {
+        "stored": stored_n,
+        "merged": merged_n,
+        "total": len(req.messages),
+        "agent": agent_key,
+    }
 
 
 @app.post("/v1/store")
 async def store(req: StoreRequest) -> Dict[str, Any]:
     """Manually store a single memory."""
-    if _storage is None:
-        raise HTTPException(503, "Storage not initialised")
+    if req.agent == "all":
+        raise HTTPException(400, "Cannot store to 'all' -- specify an agent")
+
+    storage = _get_storage(req.agent)
 
     vector = None
     if _embedder:
@@ -245,7 +357,7 @@ async def store(req: StoreRequest) -> Dict[str, Any]:
         except Exception:
             pass
 
-    res = _storage.merge_or_store(
+    res = storage.merge_or_store(
         text=req.text,
         vector=vector,
         category=req.category,
@@ -253,25 +365,33 @@ async def store(req: StoreRequest) -> Dict[str, Any]:
         source_session=None,
     )
 
-    return {"id": res["id"], "stored": res["action"] == "inserted", "merged": res["action"] == "merged", "similarity": res.get("similarity")}
+    agent_key = StoragePool.normalize_key(req.agent)
+    return {
+        "id": res["id"],
+        "stored": res["action"] == "inserted",
+        "merged": res["action"] == "merged",
+        "similarity": res.get("similarity"),
+        "agent": agent_key,
+    }
 
 
 @app.delete("/v1/forget")
 async def forget(req: ForgetRequest) -> Dict[str, Any]:
     """Delete a memory by ID or by searching for it."""
-    if _storage is None:
-        raise HTTPException(503, "Storage not initialised")
+    if req.agent == "all":
+        raise HTTPException(400, "Cannot forget from 'all' -- specify an agent")
+
+    storage = _get_storage(req.agent)
 
     if req.id:
-        deleted = _storage.delete_memory(req.id)
+        deleted = storage.delete_memory(req.id)
         return {"deleted": deleted, "id": req.id}
 
     if req.query:
-        # Search and delete first match
-        results = _storage.search_text(req.query, limit=1)
+        results = storage.search_text(req.query, limit=1)
         if results:
             mid = results[0]["id"]
-            deleted = _storage.delete_memory(mid)
+            deleted = storage.delete_memory(mid)
             return {"deleted": deleted, "id": mid}
         return {"deleted": False, "reason": "no match found"}
 
@@ -282,42 +402,101 @@ async def forget(req: ForgetRequest) -> Dict[str, Any]:
 async def search_interactive(
     query: str = Query(..., min_length=1),
     limit: int = Query(default=5, ge=1, le=50),
+    agent: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
-    """Interactive search (for CLI/debug)."""
-    if _search is None:
-        raise HTTPException(503, "Search not initialised")
+    """Interactive search (for CLI/debug).
 
-    results = await _search.search(query=query, limit=limit)
+    Use ``agent=all`` to search across all agent databases.
+    """
+    if agent == "all":
+        # Reuse recall logic
+        req = RecallRequest(query=query, limit=limit, agent="all")
+        return await _recall_all(req)
+
+    search = _get_search(agent)
+    results = await search.search(query=query, limit=limit)
+
+    agent_key = StoragePool.normalize_key(agent)
     return {
         "query": query,
+        "agent": agent_key,
         "count": len(results),
         "results": [r.to_dict() for r in results],
     }
 
 
 @app.post("/v1/decay")
-async def decay() -> Dict[str, Any]:
-    """Run weekly Ebbinghaus strength decay (cron-friendly)."""
-    if _storage is None:
-        raise HTTPException(503, "Storage not initialised")
+async def decay(req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
+    """Run weekly Ebbinghaus strength decay (cron-friendly).
 
-    decayed = _storage.decay_all(days_threshold=7, decay_amount=0.05, min_strength=0.3)
-    total = _storage.stats().get("total_memories", 0)
-    return {"decayed": decayed, "total": total}
+    Use ``agent="all"`` to decay across all agent databases.
+    """
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    if req.agent == "all":
+        total_decayed = 0
+        total_memories = 0
+        per_agent: Dict[str, int] = {}
+        for agent_id in _storage_pool.get_all_agents():
+            storage = _storage_pool.get(agent_id)
+            decayed = storage.decay_all(days_threshold=7, decay_amount=0.05, min_strength=0.3)
+            total = storage.stats().get("total_memories", 0)
+            total_decayed += decayed
+            total_memories += total
+            per_agent[agent_id] = decayed
+        return {"decayed": total_decayed, "total": total_memories, "per_agent": per_agent}
+
+    storage = _get_storage(req.agent)
+    decayed = storage.decay_all(days_threshold=7, decay_amount=0.05, min_strength=0.3)
+    total = storage.stats().get("total_memories", 0)
+
+    agent_key = StoragePool.normalize_key(req.agent)
+    return {"decayed": decayed, "total": total, "agent": agent_key}
 
 
 @app.post("/v1/consolidate")
-async def consolidate() -> Dict[str, Any]:
+async def consolidate(req: ConsolidateRequest = ConsolidateRequest()) -> Dict[str, Any]:
     """Deduplicate and cleanup memories.
 
     1) Find memory pairs with cosine similarity > 0.90
     2) Merge duplicates (keep higher importance; combine text)
     3) Soft-delete memories with strength < 0.3 and not accessed in 30 days
-    """
-    if _storage is None:
-        raise HTTPException(503, "Storage not initialised")
 
-    conn = _storage._get_conn()  # internal connection; safe within single-process service
+    Use ``agent="all"`` to consolidate all agent databases.
+    """
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    if req.agent == "all":
+        total_merged = 0
+        total_archived = 0
+        per_agent: Dict[str, Dict[str, int]] = {}
+        for agent_id in _storage_pool.get_all_agents():
+            try:
+                result = _consolidate_single(agent_id)
+                total_merged += result["merged"]
+                total_archived += result["archived"]
+                per_agent[agent_id] = result
+            except Exception as exc:
+                logger.warning("Consolidation failed for %s: %s", agent_id, exc)
+                per_agent[agent_id] = {"error": str(exc)}
+        return {
+            "merged": total_merged,
+            "archived": total_archived,
+            "per_agent": per_agent,
+        }
+
+    agent_key = StoragePool.normalize_key(req.agent)
+    result = _consolidate_single(agent_key)
+    result["agent"] = agent_key
+    return result
+
+
+def _consolidate_single(agent_id: str) -> Dict[str, Any]:
+    """Run consolidation on a single agent's database."""
+    storage = _storage_pool.get(agent_id)
+    conn = storage._get_conn()
     now = time.time()
 
     total_before = conn.execute(
@@ -401,16 +580,13 @@ async def consolidate() -> Dict[str, Any]:
     try:
         conn.execute("BEGIN")
 
-        # Merge duplicates cluster-by-cluster
         for root, members in clusters.items():
             if len(members) < 2:
                 continue
 
-            # Pick keeper: highest importance
             keeper = max(members, key=lambda rr: float(rr["importance"] or 0.0))
             keeper_id = keeper["id"]
 
-            # Aggregate fields
             texts: List[str] = []
             imps: List[float] = []
             strengths: List[float] = []
@@ -430,12 +606,11 @@ async def consolidate() -> Dict[str, Any]:
                 if emb_row and emb_row[0] is not None:
                     vecs.append(np.frombuffer(emb_row[0], dtype=np.float32))
 
-            merged_text = "\n• ".join([t for t in texts if t])
+            merged_text = "\n\u2022 ".join([t for t in texts if t])
             new_importance = max(imps) if imps else float(keeper["importance"] or 0.5)
             new_strength = min(max(strengths) + 0.2, 5.0) if strengths else 1.0
             new_last_acc = max(last_accs) if last_accs else now
 
-            # Update keeper row
             conn.execute(
                 """
                 UPDATE memories
@@ -454,7 +629,6 @@ async def consolidate() -> Dict[str, Any]:
                 (keeper_id, merged_text),
             )
 
-            # Update keeper vector to mean of cluster
             if vecs:
                 try:
                     avg = np.mean(np.vstack(vecs), axis=0).astype(np.float32)
@@ -465,7 +639,6 @@ async def consolidate() -> Dict[str, Any]:
                 except Exception:
                     pass
 
-            # Soft-delete the rest
             for m in members:
                 if m["id"] == keeper_id:
                     continue
@@ -502,7 +675,8 @@ async def consolidate() -> Dict[str, Any]:
     ).fetchone()["c"]
 
     logger.info(
-        "Consolidation complete: merged=%d archived=%d total_before=%d total_after=%d pairs=%d",
+        "Consolidation complete [%s]: merged=%d archived=%d before=%d after=%d pairs=%d",
+        agent_id,
         merged,
         archived,
         total_before,
@@ -519,11 +693,52 @@ async def consolidate() -> Dict[str, Any]:
 
 
 @app.get("/v1/stats")
-async def stats() -> Dict[str, Any]:
-    """Return memory statistics."""
-    if _storage is None:
-        raise HTTPException(503, "Storage not initialised")
-    return _storage.stats()
+async def stats(
+    agent: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Return memory statistics.
+
+    Use ``agent=all`` for aggregated stats across all agents.
+    """
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    if agent == "all":
+        per_agent: Dict[str, Dict[str, Any]] = {}
+        totals = {"total_memories": 0, "entities": 0, "relationships": 0, "temporal_facts": 0}
+        for agent_id in _storage_pool.get_all_agents():
+            s = _storage_pool.get(agent_id).stats()
+            per_agent[agent_id] = s
+            totals["total_memories"] += s.get("total_memories", 0)
+            totals["entities"] += s.get("entities", 0)
+            totals["relationships"] += s.get("relationships", 0)
+            totals["temporal_facts"] += s.get("temporal_facts", 0)
+        return {**totals, "per_agent": per_agent}
+
+    storage = _get_storage(agent)
+    s = storage.stats()
+    s["agent"] = StoragePool.normalize_key(agent)
+    return s
+
+
+@app.get("/v1/agents")
+async def list_agents() -> Dict[str, Any]:
+    """List all known agent memory databases."""
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    agents = _storage_pool.get_all_agents()
+    details: Dict[str, Any] = {}
+    for agent_id in agents:
+        storage = _storage_pool.get(agent_id)
+        s = storage.stats()
+        details[agent_id] = {
+            "total_memories": s.get("total_memories", 0),
+            "entities": s.get("entities", 0),
+            "db_path": storage.db_path,
+        }
+
+    return {"agents": agents, "count": len(agents), "details": details}
 
 
 @app.get("/v1/health")
@@ -532,15 +747,17 @@ async def health() -> Dict[str, Any]:
     status: Dict[str, Any] = {
         "status": "ok",
         "uptime_seconds": round(time.time() - _start_time, 1),
-        "storage": _storage is not None,
+        "storage": _storage_pool is not None,
         "embedder": _embedder is not None,
     }
 
-    if _storage:
+    if _storage_pool:
         try:
-            s = _storage.stats()
-            status["total_memories"] = s["total_memories"]
-            status["entities"] = s["entities"]
+            agents = _storage_pool.get_all_agents()
+            status["agents"] = agents
+            main_stats = _storage_pool.get("main").stats()
+            status["total_memories"] = main_stats["total_memories"]
+            status["entities"] = main_stats["entities"]
         except Exception:
             pass
 
@@ -560,7 +777,7 @@ def main() -> None:
 
     logger.info("Starting OpenClaw Memory API on %s:%d", cfg.api_host, cfg.api_port)
     uvicorn.run(
-        "asuman_memory.api:app",
+        "agent_memory.api:app",
         host=cfg.api_host,
         port=cfg.api_port,
         log_level="info",

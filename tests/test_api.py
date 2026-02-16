@@ -12,11 +12,11 @@ import time
 import pytest
 from httpx import AsyncClient, ASGITransport
 
-import asuman_memory.api as api_module
-from asuman_memory.api import app
-from asuman_memory.storage import MemoryStorage
-from asuman_memory.search import HybridSearch
-from asuman_memory.entities import KnowledgeGraph
+import agent_memory.api as api_module
+from agent_memory.api import app
+from agent_memory.storage import MemoryStorage
+from agent_memory.search import HybridSearch
+from agent_memory.entities import KnowledgeGraph
 
 
 class _StubEmbedder:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from asuman_memory.turkish import (
+from agent_memory.turkish import (
     ascii_fold,
     lemmatize,
     normalize_text,

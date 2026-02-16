@@ -4,7 +4,7 @@ import os
 import tempfile
 import pytest
 
-from asuman_memory.storage import MemoryStorage
+from agent_memory.storage import MemoryStorage
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ class TestEntityCRUD:
 
     def test_link_entities(self, storage):
         eid1 = storage.store_entity(name="User", entity_type="person")
-        eid2 = storage.store_entity(name="Asuman", entity_type="person")
+        eid2 = storage.store_entity(name="Agent", entity_type="person")
         rid = storage.link_entities(eid1, eid2, "works_with", context="testing")
         assert rid is not None
 

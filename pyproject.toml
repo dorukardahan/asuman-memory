@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
-name = "asuman-memory"
-version = "0.1.0"
-description = "Conversational memory system for Asuman AI assistant"
+name = "agent-memory"
+version = "0.2.0"
+description = "Conversational memory system for AI agents — hybrid search, Turkish NLP, per-agent routing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -30,10 +30,10 @@ test = [
 ]
 
 [project.scripts]
-asuman-memory = "asuman_memory.api:main"
+agent-memory = "agent_memory.api:main"
 
 [tool.setuptools.packages.find]
-include = ["asuman_memory*"]
+include = ["agent_memory*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

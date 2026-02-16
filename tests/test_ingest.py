@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from asuman_memory.ingest import (
+from agent_memory.ingest import (
     Chunk,
     _chunk_session,
     _extract_text,
@@ -19,7 +19,7 @@ from asuman_memory.ingest import (
     discover_sessions,
     ingest_sessions,
 )
-from asuman_memory.storage import MemoryStorage
+from agent_memory.storage import MemoryStorage
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ class TestParseSessionFile:
 
 class TestDiscoverSessions:
     def test_discover_sessions(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("ASUMAN_SESSIONS_DIR", str(tmp_path))
+        monkeypatch.setenv("AGENT_MEMORY_SESSIONS_DIR", str(tmp_path))
         (tmp_path / "a.jsonl").write_text("{}\n")
         (tmp_path / "b.jsonl").write_text("{}\n")
         (tmp_path / "c.txt").write_text("not a session")
@@ -233,7 +233,7 @@ class TestDiscoverSessions:
         assert all(s.suffix == ".jsonl" for s in sessions)
 
     def test_discover_nonexistent_dir(self):
-        sessions = discover_sessions("/tmp/nonexistent-asuman-test-dir")
+        sessions = discover_sessions("/tmp/nonexistent-agent-memory-test-dir")
         assert sessions == []
 
 
@@ -299,7 +299,7 @@ class TestIngestSessions:
     async def test_ingest_with_knowledge_graph(
         self, tmp_path, tmp_storage, fake_embedder, sample_session_entries
     ):
-        from asuman_memory.entities import KnowledgeGraph
+        from agent_memory.entities import KnowledgeGraph
 
         kg = KnowledgeGraph(storage=tmp_storage)
         sessions_dir = tmp_path / "sessions"

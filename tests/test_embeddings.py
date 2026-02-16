@@ -4,7 +4,7 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 
-from asuman_memory.embeddings import OpenRouterEmbeddings, EmbeddingError
+from agent_memory.embeddings import OpenRouterEmbeddings, EmbeddingError
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ class TestCache:
 
 
 class TestCallAPI:
-    @patch("asuman_memory.embeddings.requests.post")
+    @patch("agent_memory.embeddings.requests.post")
     def test_successful_call(self, mock_post, embedder):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -47,7 +47,7 @@ class TestCallAPI:
         assert len(result) == 1
         assert result[0] == [0.1, 0.2, 0.3, 0.4]
 
-    @patch("asuman_memory.embeddings.requests.post")
+    @patch("agent_memory.embeddings.requests.post")
     def test_batch_call(self, mock_post, embedder):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -62,7 +62,7 @@ class TestCallAPI:
         result = embedder._call_api(["text1", "text2"])
         assert len(result) == 2
 
-    @patch("asuman_memory.embeddings.requests.post")
+    @patch("agent_memory.embeddings.requests.post")
     def test_non_retryable_error(self, mock_post, embedder):
         mock_resp = MagicMock()
         mock_resp.status_code = 401
@@ -75,7 +75,7 @@ class TestCallAPI:
 
 @pytest.mark.asyncio
 class TestAsyncAPI:
-    @patch("asuman_memory.embeddings.requests.post")
+    @patch("agent_memory.embeddings.requests.post")
     async def test_embed_uses_cache(self, mock_post, embedder):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -89,7 +89,7 @@ class TestAsyncAPI:
         assert v1 == v2
         assert mock_post.call_count == 1  # only one API call
 
-    @patch("asuman_memory.embeddings.requests.post")
+    @patch("agent_memory.embeddings.requests.post")
     async def test_embed_batch_partial_cache(self, mock_post, embedder):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

@@ -2,7 +2,7 @@
 
 import pytest
 
-from asuman_memory.triggers import (
+from agent_memory.triggers import (
     should_trigger,
     score_importance,
     get_confidence_tier,

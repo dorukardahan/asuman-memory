@@ -19,12 +19,12 @@ import time
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
-from asuman_memory.config import load_config
-from asuman_memory.embeddings import OpenRouterEmbeddings
-from asuman_memory.entities import KnowledgeGraph
-from asuman_memory.ingest import discover_sessions, parse_session_file
-from asuman_memory.storage import MemoryStorage
-from asuman_memory.triggers import score_importance
+from agent_memory.config import load_config
+from agent_memory.embeddings import OpenRouterEmbeddings
+from agent_memory.entities import KnowledgeGraph
+from agent_memory.ingest import discover_sessions, parse_session_file
+from agent_memory.storage import MemoryStorage
+from agent_memory.triggers import score_importance
 
 
 def _progress(done: int, total: int) -> None:

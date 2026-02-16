@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from asuman_memory.search import HybridSearch, SearchWeights, _recency_score, _rrf_fuse
-from asuman_memory.storage import MemoryStorage
+from agent_memory.search import HybridSearch, SearchWeights, _recency_score, _rrf_fuse
+from agent_memory.storage import MemoryStorage
 
 
 @pytest.fixture

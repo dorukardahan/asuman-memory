@@ -28,7 +28,7 @@ if [ -f "${ENV_FILE}" ]; then
   set +a
 fi
 
-DB_PATH="${ASUMAN_MEMORY_DB:-${HOME}/.asuman/memory.sqlite}"
+DB_PATH="${AGENT_MEMORY_DB:-${HOME}/.agent-memory/memory.sqlite}"
 
 case "${1:-}" in
   start)
