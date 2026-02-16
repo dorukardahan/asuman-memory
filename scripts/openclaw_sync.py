@@ -310,7 +310,6 @@ async def main() -> None:
         print(f"  Skipped: {stats['skipped_existing']} existing")
         if stats['errors']:
             print(f"  Errors: {stats['errors']}")
-        print(f"  DB total: {stats['db_total']} memories")
 
 
 if __name__ == "__main__":

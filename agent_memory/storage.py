@@ -400,32 +400,48 @@ class MemoryStorage:
         decay_amount: float = 0.05,
         min_strength: float = 0.3,
     ) -> int:
-        """Decay strength for memories not accessed in N days.
-
-        For rows where last_accessed_at is NULL, created_at is used.
-        Returns number of rows updated.
+        """Aggressive Ebbinghaus decay + boost.
+        - 30+ days unaccessed -> drop to 0.3
+        - < 7 days old -> protect (min 0.8)
+        - Very recent (last 24h) -> boost (+0.1)
+        - 7-30 days -> aggressive decay (-0.15)
         """
         conn = self._get_conn()
         now = time.time()
-        cutoff = now - (days_threshold * 86400.0)
         try:
             cur = conn.execute(
                 """
                 UPDATE memories
-                   SET strength = MAX(COALESCE(strength, 1.0) - ?, ?)
+                   SET strength = CASE
+                       -- 1. Very stale (30+ days): Drop to floor
+                       WHEN (COALESCE(last_accessed_at, created_at) < ? - 2592000) 
+                            THEN ?
+                       
+                       -- 2. Very recent (last 24h): Small boost
+                       WHEN (COALESCE(last_accessed_at, created_at) >= ? - 86400) 
+                            THEN MIN(COALESCE(strength, 1.0) + 0.1, 5.0)
+
+                       -- 3. Recent (7-day window): Maintain high (min 0.8)
+                       WHEN (COALESCE(last_accessed_at, created_at) >= ? - 604800) 
+                            THEN MAX(COALESCE(strength, 1.0), 0.8)
+
+                       -- 4. Mid-stale (7-30 days): Aggressive decay
+                       ELSE MAX(COALESCE(strength, 1.0) - 0.15, ?)
+                   END
                  WHERE deleted_at IS NULL
-                   AND COALESCE(last_accessed_at, created_at) < ?
-                   AND COALESCE(strength, 1.0) > ?
+                   AND (
+                       (COALESCE(last_accessed_at, created_at) < ? - 604800) -- stale
+                       OR 
+                       (COALESCE(last_accessed_at, created_at) >= ? - 86400) -- very recent (for boost)
+                   )
                 """,
-                (decay_amount, min_strength, cutoff, min_strength),
+                (now, min_strength, now, now, min_strength, now, now),
             )
             conn.commit()
             decayed = int(cur.rowcount or 0)
             logger.info(
-                "Decay run: decayed=%d (threshold_days=%d amount=%.4f min=%.2f)",
+                "Aggressive Decay run: updated=%d (min_strength=%.2f)",
                 decayed,
-                days_threshold,
-                decay_amount,
                 min_strength,
             )
             return decayed
