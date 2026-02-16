@@ -194,26 +194,209 @@ _PRODUCT_PATTERNS = [
 ]
 
 # Typed relation patterns
+# NOTE: Keep patterns conservative (false positives are costlier than misses).
+# Capturing groups are expected as: (1)=subject, (2)=object/value.
 _RELATION_PATTERNS = {
     "lives_in": [
-        re.compile(r"(\w+)\s+(.*)(?:de|da)\s+(?:yaşıyor|oturuyor|ikamet ediyor)", re.IGNORECASE),
-        re.compile(r"(\w+)\s+lives?\s+in\s+(\w[\w\s]*)", re.IGNORECASE),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:şu\s+an\s+)?(?:[\w\s]{0,12})?\b([A-ZÇĞİÖŞÜ][\w\s.-]{1,60})\b(?:'?(?:de|da)|\s+(?:de|da))\s+(?:yaşıyor|oturuyor|ikamet\s+ediyor)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:lives?|is\s+based)\s+in\s+\b([A-Z][\w\s.-]{1,60})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:in\s+)?\b([A-ZÇĞİÖŞÜ][\w\s.-]{1,60})\b(?:'?(?:de|da)|\s+(?:de|da))\s+(?:takılıyor|takiliyo|kalıyor)",
+            re.IGNORECASE,
+        ),
     ],
     "works_at": [
-        re.compile(r"(\w+)\s+(.*)(?:de|da)\s+çalışıyor", re.IGNORECASE),
-        re.compile(r"(\w+)\s+works?\s+(?:at|for)\s+(\w[\w\s]*)", re.IGNORECASE),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+\b([A-Z0-9][\w&./\-\s]{2,70})\b(?:'?(?:de|da)|\s+(?:de|da))\s+çalışıyor",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+works?\s+(?:at|for)\s+\b([A-Z0-9][\w&./\-\s]{2,70})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+\b([A-Z0-9][\w&./\-\s]{2,70})\b\s+(?:bünyesinde|ekibinde)\s+(?:çalışıyor|görev\s+yapıyor)",
+            re.IGNORECASE,
+        ),
     ],
     "status": [
-        re.compile(r"(\w+)\s+(?:durumu|statüsü)\s+(aktif|pasif|beklemede|tamamlandı|iptal)", re.IGNORECASE),
-        re.compile(r"(\w+)\s+(?:status|state)\s+(?:is|=)\s+(active|inactive|pending|completed|cancelled)", re.IGNORECASE),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:durumu|statüsü|statusu)\s*(?:is|=|:)\s*(aktif|pasif|beklemede|tamamlandı|iptal|çözüldü|açık|kapalı)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:status|state)\s*(?:is|=|:)\s*(active|inactive|pending|completed|cancelled|resolved|open|closed)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:şu\s+an\s+)?(aktif|pasif|beklemede|açık|kapalı|online|offline)",
+            re.IGNORECASE,
+        ),
     ],
     "prefers": [
-        re.compile(r"(\w+)\s+(\w[\w\s]*)\s+tercih\s+ediyor", re.IGNORECASE),
-        re.compile(r"(\w+)\s+prefers?\s+(\w[\w\s]*)", re.IGNORECASE),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+\b([\w#+./\-\s]{2,60})\b\s+tercih\s+ediyor",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+prefers?\s+\b([\w#+./\-\s]{2,60})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+için\s+tercih\s+(?:o|şu|bu)?\s*\b([\w#+./\-\s]{2,60})\b",
+            re.IGNORECASE,
+        ),
     ],
     "has_state": [
-        re.compile(r"(\w+)\s+(hasta|iyi|yorgun|müsait|meşgul)", re.IGNORECASE),
-        re.compile(r"(\w+)\s+is\s+(sick|well|tired|available|busy|online|offline)", re.IGNORECASE),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(hasta|iyi|yorgun|müsait|meşgul|yoğun|online|offline)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+is\s+(sick|well|tired|available|busy|online|offline|overloaded)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:şu\s+an\s+)?(müsait|meşgul|boşta|yoğun)",
+            re.IGNORECASE,
+        ),
+    ],
+    "created_by": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:,\s*)?(?:tarafından|tarafindan)\s+\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+(?:yaratıldı|oluşturuldu|geliştirildi)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:was\s+)?(?:created|built|developed)\s+by\s+\b([A-Z][\w.-]{1,40})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+'?(?:ı|i|u|ü)?\s+\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+yarattı",
+            re.IGNORECASE,
+        ),
+    ],
+    "uses": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+\b([A-Z0-9][\w#+./\-\s]{2,70})\b\s+(?:kullanıyor|kullaniyor)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+uses\s+\b([A-Z0-9][\w#+./\-\s]{2,70})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+\b([A-Z0-9][\w#+./\-\s]{2,70})\b\s+(?:ile|with)\s+(?:çalışıyor|run(?:ning)?|works?)",
+            re.IGNORECASE,
+        ),
+    ],
+    "deployed_on": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+\b([A-Z0-9][\w./\-\s]{2,70})\b(?:'?(?:te|ta|de|da)|\s+(?:te|ta|de|da))\s+deploy\s+edildi",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:is\s+)?deployed\s+on\s+\b([A-Z0-9][\w./\-\s]{2,70})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+\b([A-Z0-9][\w./\-\s]{2,70})\b\s+üstünde\s+koşuyor",
+            re.IGNORECASE,
+        ),
+    ],
+    "depends_on": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+\b([A-Z0-9][\w./\-\s]{2,70})\b(?:'?(?:e|a)|\s+(?:e|a))\s+bağlı",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+depends\s+on\s+\b([A-Z0-9][\w./\-\s]{2,70})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+için\s+gerekli\s+olan\s+\b([A-Z0-9][\w./\-\s]{2,70})\b",
+            re.IGNORECASE,
+        ),
+    ],
+    "scheduled_at": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+her\s+(\d+\s*(?:dakika|saat|gün|hafta))(?:te|ta|de|da)?\s+bir\s+(?:çalışıyor|çalıştırılıyor)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:is\s+)?scheduled\s+(?:at|for|every)\s+(\d+\s*(?:min|mins|minutes?|hours?|days?|weeks?))",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:cron|schedule)\s*[:=]\s*(\S+)",
+            re.IGNORECASE,
+        ),
+    ],
+    "configured_as": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+\b([\w./\-]{2,40})\b\s+olarak\s+konfigüre\s+edildi",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:is\s+)?configured\s+as\s+\b([\w./\-]{2,40})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-\s]{2,70})\b\s+(?:mode|rol)\s*(?:is|=|:)\s*\b([\w./\-]{2,40})\b",
+            re.IGNORECASE,
+        ),
+    ],
+    "member_of": [
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+\b([A-Z0-9][\w&./\-\s]{2,70})\b(?:'?(?:nin|nın|nun|nün)|\s+(?:nin|nın|nun|nün))\s+üyesi",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+is\s+(?:a\s+)?member\s+of\s+\b([A-Z0-9][\w&./\-\s]{2,70})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-ZÇĞİÖŞÜ][\w.-]{1,40})\b\s+\b([A-Z0-9][\w&./\-\s]{2,70})\b\s+ekibinde",
+            re.IGNORECASE,
+        ),
+    ],
+    "version_of": [
+        re.compile(
+            r"\b([A-Z0-9][\w./\-]{1,40}\s+v?\d+(?:\.\d+){0,3})\b\s*,?\s*\b([A-Z0-9][\w./\-]{1,40})\b(?:'?(?:ın|in|un|ün)|\s+(?:ın|in|un|ün))\s+versiyonu",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-]{1,40}\s+v?\d+(?:\.\d+){0,3})\b\s+is\s+(?:a\s+)?version\s+of\s+\b([A-Z0-9][\w./\-]{1,40})\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b([A-Z0-9][\w./\-]{1,40})\b\s+v(\d+(?:\.\d+){0,3})\b",
+            re.IGNORECASE,
+        ),
+    ],
+}
+
+# Anti-patterns to suppress obvious false positives per relation type.
+_RELATION_ANTI_PATTERNS = {
+    "works_at": [
+        re.compile(r"\b(uyuyor|dinleniyor|oturuyor)\b", re.IGNORECASE),
+    ],
+    "uses": [
+        re.compile(r"\b(kullanmıyor|kullanmiyor|does\s+not\s+use|don't\s+use)\b", re.IGNORECASE),
+    ],
+    "depends_on": [
+        re.compile(r"\b(bağlı\s+değil|bagli\s+degil|independent\s+of)\b", re.IGNORECASE),
+    ],
+    "scheduled_at": [
+        re.compile(r"\b(schedule\s+yok|zamanlama\s+yok|not\s+scheduled)\b", re.IGNORECASE),
+    ],
+    "version_of": [
+        re.compile(r"\b(v(?:ery)?\s+good)\b", re.IGNORECASE),
     ],
 }
 
