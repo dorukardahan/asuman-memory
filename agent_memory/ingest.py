@@ -39,6 +39,16 @@ _SKIP_PREFIXES: tuple[str, ...] = (
     "NO_REPLY",
 )
 
+# System noise patterns — gateway connects, test msgs, cron boilerplate [S9, 2026-02-17]
+_NOISE_PATTERNS_RE = [
+    re.compile(r"whatsapp gateway (?:connected|disconnected)", re.IGNORECASE),
+    re.compile(r"^GatewayRestart:", re.IGNORECASE),
+    re.compile(r"^\[queued messages while agent was busy\]", re.IGNORECASE),
+    re.compile(r"^say\s+(?:ok|hello|hi|test|something)\s*$", re.IGNORECASE),
+    re.compile(r"^Conversation info \(untrusted metadata\)", re.IGNORECASE),
+    re.compile(r"^Replied message \(untrusted", re.IGNORECASE),
+]
+
 
 def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
@@ -60,11 +70,34 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+# Patterns for operationally important tool outputs [S13, 2026-02-17]
+_IMPORTANT_TOOL_PATTERNS = [
+    re.compile(r"systemctl\s+(restart|stop|start|enable|disable)", re.IGNORECASE),
+    re.compile(r"docker\s+(compose|build|push|up|down|restart|stop)", re.IGNORECASE),
+    re.compile(r"git\s+(push|merge|tag|commit)", re.IGNORECASE),
+    re.compile(r"\b(deploy|migrate|backup|restore)\b", re.IGNORECASE),
+    re.compile(r"\b(error|fail|crash|killed|SIGKILL|OOM|denied)\b", re.IGNORECASE),
+    re.compile(r"apt(?:-get)?\s+(install|upgrade|remove)", re.IGNORECASE),
+    re.compile(r"npm\s+(publish|install|update)", re.IGNORECASE),
+    re.compile(r"pip3?\s+install", re.IGNORECASE),
+    re.compile(r"ufw\s+(allow|deny|enable|disable)", re.IGNORECASE),
+    re.compile(r"certbot", re.IGNORECASE),
+]
+
+
 def _is_tool_call(entry: Dict[str, Any]) -> bool:
-    """Return True if the JSONL entry is a tool call / tool result."""
+    """Return True if the JSONL entry is a tool call that should be SKIPPED.
+
+    Selectively allows important tool results through (deploy, git, config,
+    service, error outputs). [S13, 2026-02-17]
+    """
     msg = entry.get("message", {})
     role = msg.get("role", "")
     if role in ("tool", "function"):
+        # Check if tool result contains operationally important content
+        content = _extract_text(msg.get("content", ""))
+        if content and any(p.search(content) for p in _IMPORTANT_TOOL_PATTERNS):
+            return False  # Don't skip — capture this important tool output
         return True
     # Check for tool_calls in content
     content = msg.get("content", [])
@@ -87,6 +120,10 @@ def _should_skip(text: str, role: str) -> bool:
             return True
     if role == "system":
         return True
+    # Pattern-based noise filtering [S9, 2026-02-17]
+    for pattern in _NOISE_PATTERNS_RE:
+        if pattern.search(stripped):
+            return True
     return False
 
 
@@ -152,7 +189,7 @@ def _chunk_session(
             # Flush pending user message
             if pending_user:
                 chunks.append(Chunk(
-                    text=pending_user[:2000],
+                    text=pending_user[:4000],
                     timestamp=pending_ts or timestamp,
                     session_id=session_id,
                     role="user",
@@ -166,20 +203,20 @@ def _chunk_session(
             # If we had a pending user without assistant reply, flush it
             if pending_user:
                 chunks.append(Chunk(
-                    text=pending_user[:2000],
+                    text=pending_user[:4000],
                     timestamp=pending_ts or timestamp,
                     session_id=session_id,
                     role="user",
                 ))
-            pending_user = text[:2000]
+            pending_user = text[:4000]
             pending_ts = timestamp
 
         elif role == "assistant":
             if pending_user:
                 # Form Q&A pair
-                qa_text = f"User: {pending_user}\nAssistant: {text[:1500]}"
+                qa_text = f"User: {pending_user}\nAssistant: {text[:3000]}"
                 chunks.append(Chunk(
-                    text=qa_text[:2000],
+                    text=qa_text[:4000],
                     timestamp=pending_ts or timestamp,
                     session_id=session_id,
                     role="qa_pair",
@@ -190,7 +227,7 @@ def _chunk_session(
                 # Standalone assistant message
                 if len(text) > 20:
                     chunks.append(Chunk(
-                        text=text[:2000],
+                        text=text[:4000],
                         timestamp=timestamp,
                         session_id=session_id,
                         role="assistant",
@@ -199,7 +236,7 @@ def _chunk_session(
     # Flush any remaining pending user message
     if pending_user:
         chunks.append(Chunk(
-            text=pending_user[:2000],
+            text=pending_user[:4000],
             timestamp=pending_ts or "",
             session_id=session_id,
             role="user",

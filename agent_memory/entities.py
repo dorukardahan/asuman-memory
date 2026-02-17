@@ -92,22 +92,40 @@ KNOWN_ORGS: Set[str] = {
 }
 
 KNOWN_TECH: Set[str] = {
-    "python", "javascript", "typescript", "node.js", "react", "vue",
-    "claude", "gpt", "llm", "ai", "ml", "api", "sdk",
-    "sqlite", "chromadb", "embedding", "vector", "rag",
-    "whatsapp", "telegram", "discord", "fastapi", "uvicorn",
-    "docker", "kubernetes", "linux", "git", "github",
-}
+    # Languages & runtimes
+    "python", "javascript", "typescript", "node.js", "react", "vue", "bash",
+    # AI/ML
+    "claude", "gpt", "llm", "ai", "ml", "api", "sdk", "opus", "sonnet",
+    "codex", "gemini", "kimi", "qwen", "openai", "anthropic",
+    # Databases & storage
+    "sqlite", "chromadb", "embedding", "vector", "rag", "postgresql",
+    "postgres", "redis", "fts5", "sqlite-vec",
+    # Infrastructure
+    "docker", "kubernetes", "linux", "git", "github", "systemd", "nginx",
+    "traefik", "cloudflare", "certbot", "ufw", "iptables", "pm2",
+    # Frameworks & tools
+    "whatsapp", "telegram", "discord", "fastapi", "uvicorn", "celery",
+    "openclaw", "llama-server", "tmux", "ssh",
+    # Project-specific
+    "senti", "track", "myapp", "bureau", "project",
+    "asuman", "x-accounts", "domain-search",
+}  # expanded [S14, 2026-02-17]
 
 # ---------------------------------------------------------------------------
 # Entity aliases — informal names → canonical names
 # ---------------------------------------------------------------------------
 
 ENTITY_ALIASES: Dict[str, str] = {
-    # Customize with your own aliases → canonical names, e.g.:
-    # "boss": "Alice",
-    # "oc": "OpenClaw",
-    # "wp": "WhatsApp",
+    # Project aliases [S14, 2026-02-17]
+    "oc": "OpenClaw",
+    "wp": "WhatsApp",
+    "tg": "Telegram",
+    "vps": "VPS",
+    "db": "SQLite",
+    "pg": "PostgreSQL",
+    "k8s": "Kubernetes",
+    "cf": "Cloudflare",
+    "gh": "GitHub",
 }
 
 
@@ -602,15 +620,25 @@ class KnowledgeGraph:
             )
             entity_ids.append(eid)
 
-        # Co-occurrence relationships
+        # Co-occurrence relationships — use typed relation when both are tech [S14, 2026-02-17]
         if len(entity_ids) > 1:
             for i in range(len(entity_ids)):
                 for j in range(i + 1, len(entity_ids)):
+                    # Determine relation type based on entity types
+                    ent_i = all_ents[i] if i < len(all_ents) else None
+                    ent_j = all_ents[j] if j < len(all_ents) else None
+                    rel_type = "mentioned_with"
+                    confidence = 0.5
+                    if ent_i and ent_j:
+                        both_tech = ent_i.label == "tech" and ent_j.label == "tech"
+                        if both_tech:
+                            rel_type = "uses"
+                            confidence = 0.6
                     self.storage.link_entities(
                         entity_ids[i],
                         entity_ids[j],
-                        relation_type="mentioned_with",
-                        confidence=0.5,
+                        relation_type=rel_type,
+                        confidence=confidence,
                         context=text[:200],
                     )
 

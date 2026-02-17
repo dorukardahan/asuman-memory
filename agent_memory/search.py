@@ -44,11 +44,15 @@ def normalize_query(text: str) -> str:
 
 @dataclass
 class SearchWeights:
-    """Configurable weights for each search layer."""
-    semantic: float = 0.40
-    keyword: float = 0.25
-    recency: float = 0.15
-    strength: float = 0.20
+    """Configurable weights for each search layer.
+
+    Rebalanced 2026-02-17 [S2]: semantic-first RRF. Previous 35% time-based
+    weight (recency+strength) drowned semantic relevance → 3.2/10 search quality.
+    """
+    semantic: float = 0.55   # was 0.40 — semantic match is primary signal
+    keyword: float = 0.25    # unchanged — BM25 is second-best
+    recency: float = 0.10    # was 0.15 — still a factor but less dominant
+    strength: float = 0.10   # was 0.20 — tiebreaker only
 
 
 @dataclass

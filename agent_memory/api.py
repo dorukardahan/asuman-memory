@@ -300,7 +300,7 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
             continue
         role = msg.get("role", "user")
         cleaned.append({
-            "text": text[:2000],
+            "text": text[:4000],  # raised from 2000 [S10, 2026-02-17]
             "role": role,
             "session": msg.get("session", ""),
             "timestamp": msg.get("timestamp", ""),
@@ -817,25 +817,56 @@ async def list_agents() -> Dict[str, Any]:
 
 @app.get("/v1/health")
 async def health() -> Dict[str, Any]:
-    """Health check."""
-    status: Dict[str, Any] = {
-        "status": "ok",
-        "uptime_seconds": round(time.time() - _start_time, 1),
-        "storage": _storage_pool is not None,
-        "embedder": _embedder is not None,
-    }
+    """Health check with real probes. [S12, 2026-02-17]
 
+    Returns 200 with status "ok"|"degraded"|"down".
+    Checks: storage (SQLite read), embedding (probe text), vectorless count.
+    """
+    checks: Dict[str, bool] = {"storage": False, "embedding": False}
+    vectorless_count = 0
+    total_memories = 0
+    agents_list: list = []
+
+    # Storage check — can we read from main DB?
     if _storage_pool:
         try:
-            agents = _storage_pool.get_all_agents()
-            status["agents"] = agents
             main_stats = _storage_pool.get("main").stats()
-            status["total_memories"] = main_stats["total_memories"]
-            status["entities"] = main_stats["entities"]
+            checks["storage"] = True
+            total_memories = main_stats.get("total_memories", 0)
+            agents_list = _storage_pool.get_all_agents()
         except Exception:
             pass
 
-    return status
+    # Embedding check — can we actually embed a probe text?
+    if _embedder:
+        try:
+            await asyncio.wait_for(_embedder.embed("health_probe"), timeout=5.0)
+            checks["embedding"] = True
+        except Exception:
+            pass
+
+    # Vectorless count — memories missing vector embeddings
+    if _storage_pool and checks["storage"]:
+        try:
+            conn = _storage_pool.get("main")._get_conn()
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM memories WHERE vector_rowid IS NULL AND deleted_at IS NULL"
+            ).fetchone()
+            vectorless_count = row["c"] if row else 0
+        except Exception:
+            pass
+
+    all_ok = all(checks.values())
+    overall = "ok" if all_ok else ("degraded" if checks["storage"] else "down")
+
+    return {
+        "status": overall,
+        "checks": checks,
+        "vectorless_count": vectorless_count,
+        "uptime_seconds": round(time.time() - _start_time, 1),
+        "total_memories": total_memories,
+        "agents": agents_list,
+    }
 
 
 # ---------------------------------------------------------------------------

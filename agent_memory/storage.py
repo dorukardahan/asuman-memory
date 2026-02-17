@@ -166,6 +166,7 @@ class MemoryStorage:
             self._conn = sqlite3.connect(self.db_path)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")  # 5s wait on write contention
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA cache_size = -64000")  # 64MB page cache
             self._conn.execute("PRAGMA mmap_size = 300000000")  # 300MB mmap

@@ -35,11 +35,11 @@ class Config:
     api_host: str = "127.0.0.1"
     api_port: int = 8787
 
-    # Search weights (4-layer hybrid search)
-    weight_semantic: float = 0.40
+    # Search weights (4-layer hybrid search) — rebalanced 2026-02-17 [S2]
+    weight_semantic: float = 0.55
     weight_keyword: float = 0.25
-    weight_recency: float = 0.15
-    weight_strength: float = 0.20
+    weight_recency: float = 0.10
+    weight_strength: float = 0.10
 
     # Sessions
     sessions_dir: str = str(Path.home() / ".openclaw" / "agents" / "main" / "sessions")

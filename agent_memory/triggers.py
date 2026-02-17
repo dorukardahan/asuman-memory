@@ -123,7 +123,10 @@ def should_trigger(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Importance scoring (0.0 – 1.0)
+# Importance scoring (0.0 – 1.0) — Recalibrated 2026-02-17 [S1]
+#
+# Design: base=0.20, most messages 0.20-0.50, only explicit markers/decisions
+# push above 0.70. Previous version had base=0.50 causing 33% at 0.9+.
 # ---------------------------------------------------------------------------
 
 _IMPORTANCE_MARKERS: List[str] = [
@@ -145,6 +148,15 @@ _TASK_MARKERS: List[str] = [
     "action item", "next step",
 ]
 
+_OPS_MARKERS: List[str] = [
+    "deploy", "deployed", "restart", "restarted", "migrate", "migrated",
+    "taşıdık", "taşıdım", "deploy ettim", "restart ettim",
+    "config", "konfigürasyon", ".env", "systemd", "systemctl",
+    "merge", "merged", "commit", "pushed", "pull request",
+    "sigkill", "oom", "crash", "hata", "error", "failed",
+    "backup", "yedek", "version", "upgrade", "güncelle",
+]
+
 _NOISE_PATTERNS: List[str] = [
     r"^(?:ok|okay|tamam|evet|yes|no|hayır|hayir|hmm|haha|lol)$",
     r"^(?:thanks|teşekkür|tesekkur|sağol|sagol)[\s!.]*$",
@@ -152,65 +164,97 @@ _NOISE_PATTERNS: List[str] = [
     r"^[\W]+$",
 ]
 
+# System noise — gateway connects, test msgs, cron boilerplate
+_SYSTEM_NOISE_PATTERNS = [
+    re.compile(r"whatsapp gateway (?:connected|disconnected)", re.IGNORECASE),
+    re.compile(r"^GatewayRestart:", re.IGNORECASE),
+    re.compile(r"^\[queued messages", re.IGNORECASE),
+    re.compile(r"^say\s+(?:ok|hello|hi|test|something)\s*$", re.IGNORECASE),
+    re.compile(r"^Conversation info \(untrusted metadata\)", re.IGNORECASE),
+    re.compile(r"^Replied message \(untrusted", re.IGNORECASE),
+]
+
+# Entity stopwords — false positive capitals that inflate entity count
+_ENTITY_STOPWORDS: set = {
+    "System", "User", "Assistant", "WhatsApp", "Session",
+    "Current", "Return", "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday", "Sunday",
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+    "The", "This", "That", "Here", "There", "What", "When", "Where",
+    "How", "Why", "Who", "Which", "None", "True", "False",
+}
+
+
+def _is_system_noise(text_lower: str) -> bool:
+    """Detect gateway connects, test messages, cron boilerplate."""
+    return any(p.search(text_lower) for p in _SYSTEM_NOISE_PATTERNS)
+
 
 def score_importance(text: str, metadata: Optional[Dict] = None) -> float:
     """Calculate importance score for a message (0.0 – 1.0).
 
-    Considers question marks, explicit importance markers, decisions,
-    named entities, length, and role.
+    Recalibrated 2026-02-17: base lowered to 0.20, system noise floors at 0.10,
+    operational event markers added, entity stopwords filter, reduced role bonuses.
+    Target distribution: 15% at 0.0-0.2, 35% at 0.2-0.4, 25% at 0.4-0.6,
+    15% at 0.6-0.8, 10% at 0.8-1.0.
     """
-    score = 0.5
+    score = 0.20  # was 0.50
     text_lower = text.lower().strip()
+
+    # --- early exits for noise ---
+    for pattern in _NOISE_PATTERNS:
+        if re.match(pattern, text_lower):
+            return 0.05  # noise floor
+
+    if _is_system_noise(text_lower):
+        return 0.10  # system noise floor
 
     # --- positive signals ---
 
-    # Questions
-    qcount = text.count("?")
-    if qcount > 0:
-        score += 0.1
-    if qcount > 1:
-        score += 0.05 * min(qcount - 1, 3)
+    # Questions (reduced from +0.10 to +0.05)
+    if "?" in text and len(text) > 10:
+        score += 0.05
 
-    # Importance markers
+    # Importance markers (keep +0.25 — explicit signals)
     if any(m in text_lower for m in _IMPORTANCE_MARKERS):
         score += 0.25
 
-    # Decision markers
+    # Decision markers (keep +0.20)
     if any(m in text_lower for m in _DECISION_MARKERS):
         score += 0.20
 
-    # Task markers
+    # Task markers (+0.15)
     if any(m in text_lower for m in _TASK_MARKERS):
         score += 0.15
 
-    # Named entities (simple capital-word heuristic)
-    caps = set(re.findall(r"\b[A-ZÇĞİÖŞÜ][a-zçğıöşü]+\b", text))
-    score += min(0.15, len(caps) * 0.03)
+    # Operational event markers (NEW)
+    if any(m in text_lower for m in _OPS_MARKERS):
+        score += 0.20
 
-    # Substantive length
+    # Named entities — with stopword filter, min 3 chars
+    caps = set(re.findall(r"\b[A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,}\b", text))
+    caps -= _ENTITY_STOPWORDS
+    score += min(0.10, len(caps) * 0.02)  # was 0.15/0.03
+
+    # Substantive length (raised thresholds)
     word_count = len(text.split())
-    if word_count > 100:
-        score += 0.10
-    elif word_count > 50:
-        score += 0.05
-    elif word_count < 10:
-        score -= 0.10
+    if word_count > 150:
+        score += 0.08
+    elif word_count > 80:
+        score += 0.04
+    elif word_count < 8:
+        score -= 0.05
 
-    # Role bonus
+    # Role bonus — REDUCED
     if metadata:
         role = metadata.get("role", "")
         if role == "user":
-            score += 0.10
+            score += 0.05    # was 0.10
         elif role == "qa_pair":
-            score += 0.15
+            score += 0.08    # was 0.15
 
-    # --- negative signals ---
-    for pattern in _NOISE_PATTERNS:
-        if re.match(pattern, text_lower):
-            score -= 0.30
-            break
-
-    return max(0.0, min(1.0, score))
+    return max(0.05, min(1.0, score))
 
 
 # ---------------------------------------------------------------------------
