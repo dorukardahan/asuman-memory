@@ -4,7 +4,7 @@ Persistent, local-first memory for AI agents. One SQLite file, no Docker, no clo
 
 Your agent remembers conversations, decisions, and facts across sessions with hybrid recall.
 
-## Features (v0.4.0)
+## Features (v0.4.0+)
 
 - Hybrid search (semantic + BM25 + recency + spaced-repetition strength) with RRF fusion
 - Write-time dedup (near-duplicates merge instead of piling up)
@@ -58,6 +58,7 @@ Base URL: `http://localhost:8787` (`/docs` for Swagger)
 | `/v1/agents` | GET | List agent DBs |
 | `/v1/stats` | GET | DB stats |
 | `/v1/health` | GET | Health check |
+| `/v1/metrics` | GET | Operational metrics |
 
 ## Config
 
@@ -73,6 +74,30 @@ Base URL: `http://localhost:8787` (`/docs` for Swagger)
 | `AGENT_MEMORY_EMBEDDING_URL` | — |
 | `AGENT_MEMORY_CONFIG` | — |
 
+
+## Authentication (v0.3.0+)
+
+All endpoints except `/v1/health` require an API key:
+
+```bash
+# Set in environment
+export AGENT_MEMORY_API_KEY="your-secret-key"
+
+# Include in requests
+curl -H "X-API-Key: $AGENT_MEMORY_API_KEY" http://localhost:8787/v1/stats
+```
+
+Generate a key: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+Health endpoint is always public (for monitoring).
+
+## Security
+
+- API key authentication on all write/read endpoints
+- Rate limiting: 120 requests/minute per IP
+- CORS restricted to localhost
+- Audit logging to `/var/log/asuman-memory-audit.log`
+- SQLite files: `chmod 600` (owner-only)
 ## License
 
 MIT

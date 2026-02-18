@@ -34,6 +34,7 @@ class Config:
     # Security: bind to localhost by default. Override with AGENT_MEMORY_HOST if needed.
     api_host: str = "127.0.0.1"
     api_port: int = 8787
+    api_key: str = ""  # Required for authenticated access
 
     # Search weights (4-layer hybrid search) — rebalanced 2026-02-17 [S2]
     weight_semantic: float = 0.55
@@ -103,6 +104,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         "AGENT_MEMORY_HOST": ("api_host", str),
         "AGENT_MEMORY_SESSIONS_DIR": ("sessions_dir", str),
         "OPENROUTER_BASE_URL": ("openrouter_base_url", str),
+        "AGENT_MEMORY_API_KEY": ("api_key", str),
     }
 
     # Legacy env var fallbacks (checked only if new name is not set)

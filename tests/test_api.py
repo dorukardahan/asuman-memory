@@ -3,6 +3,8 @@
 Uses httpx AsyncClient against the FastAPI app. We manually initialise
 the module-level state that normally comes from the lifespan handler,
 pointing it at a temp database so the production DB is untouched.
+
+Updated for v0.3.0: uses StoragePool + per-agent caches.
 """
 
 from __future__ import annotations
@@ -14,9 +16,11 @@ from httpx import AsyncClient, ASGITransport
 
 import agent_memory.api as api_module
 from agent_memory.api import app
+from agent_memory.pool import StoragePool
 from agent_memory.storage import MemoryStorage
-from agent_memory.search import HybridSearch
+from agent_memory.search import HybridSearch, SearchWeights
 from agent_memory.entities import KnowledgeGraph
+from agent_memory.config import Config
 
 
 class _StubEmbedder:
@@ -28,27 +32,38 @@ class _StubEmbedder:
     async def embed_batch(self, texts):
         return [[0.0, 0.0, 0.0, 0.0]] * len(texts)
 
+    def set_storage(self, storage):
+        pass
+
 
 @pytest.fixture(autouse=True)
 def _init_api_state(tmp_path):
     """Wire the api module globals to a temp DB so every test starts clean."""
-    db_path = str(tmp_path / "api_test.sqlite")
-    storage = MemoryStorage(db_path=db_path, dimensions=4)
+    pool = StoragePool(base_dir=str(tmp_path), dimensions=4)
+    # Pre-open main storage
+    pool.get("main")
+
     stub_embedder = _StubEmbedder()
 
-    api_module._storage = storage
+    api_module._storage_pool = pool
     api_module._embedder = stub_embedder
-    api_module._search = HybridSearch(storage=storage, embedder=stub_embedder)
-    api_module._kg = KnowledgeGraph(storage=storage)
+    api_module._search_cache = {}
+    api_module._kg_cache = {}
+    api_module._search_weights = SearchWeights(
+        semantic=0.55, keyword=0.25, recency=0.10, strength=0.10,
+    )
+    api_module._config = Config(api_key="", openrouter_api_key="test-key")
     api_module._start_time = time.time()
 
     yield
 
-    storage.close()
-    api_module._storage = None
+    pool.close_all()
+    api_module._storage_pool = None
     api_module._embedder = None
-    api_module._search = None
-    api_module._kg = None
+    api_module._search_cache = {}
+    api_module._kg_cache = {}
+    api_module._search_weights = None
+    api_module._config = None
 
 
 @pytest.fixture
@@ -69,9 +84,9 @@ class TestHealth:
         resp = await client.get("/v1/health")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "ok"
+        assert data["status"] in ("ok", "degraded")
         assert "uptime_seconds" in data
-        assert data["storage"] is True
+        assert data["checks"]["storage"] is True
 
     async def test_health_has_memory_count(self, client):
         resp = await client.get("/v1/health")
@@ -126,7 +141,7 @@ class TestStore:
 
     async def test_store_validation_error(self, client):
         resp = await client.post("/v1/store", json={})
-        assert resp.status_code == 422  # missing required 'text'
+        assert resp.status_code == 422  # missing required text
 
 
 # ---------------------------------------------------------------------------

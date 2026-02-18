@@ -23,6 +23,7 @@ Run: ``python -m agent_memory.api``
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import sqlite3
 import time
@@ -33,7 +34,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+from starlette.responses import JSONResponse
+from .middleware import APIKeyMiddleware, RateLimitMiddleware, AuditLogMiddleware
 
 from .config import Config, load_config
 from .embeddings import OpenRouterEmbeddings
@@ -60,6 +65,12 @@ _search_cache: Dict[str, HybridSearch] = {}
 _kg_cache: Dict[str, KnowledgeGraph] = {}
 _search_weights: Optional[SearchWeights] = None
 _rule_detector = RuleDetector()
+
+# Audit logging handler (file-based)
+_audit_handler = logging.FileHandler("/var/log/asuman-memory-audit.log")
+_audit_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+logging.getLogger("audit").addHandler(_audit_handler)
+logging.getLogger("audit").setLevel(logging.INFO)
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +185,61 @@ async def warmup_loop():
 
 app = FastAPI(
     title="OpenClaw Memory API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
+
+# --- Security middleware (order matters: last added = first to run) ---
+# Audit logging (runs on every request)
+app.add_middleware(AuditLogMiddleware)
+
+# Rate limiting: 120 requests/minute per IP
+app.add_middleware(RateLimitMiddleware, max_requests=120, window_seconds=60)
+
+# API key authentication
+_api_key = os.environ.get("AGENT_MEMORY_API_KEY", "")
+if _api_key:
+    app.add_middleware(APIKeyMiddleware, api_key=_api_key)
+    logger.info("API key authentication enabled")
+else:
+    logger.warning("No AGENT_MEMORY_API_KEY set -- API is UNAUTHENTICATED")
+
+# CORS: restrict to localhost origins only
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost", "http://127.0.0.1"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["X-API-Key", "Content-Type"],
+)
+
+# --- Centralized error handling ---
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc):
+    logger.warning("HTTP %d: %s (path=%s)", exc.status_code, exc.detail, request.url.path)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": str(exc.detail), "status_code": exc.status_code},
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    logger.warning("Validation error: %s (path=%s)", str(exc)[:200], request.url.path)
+    return JSONResponse(
+        status_code=422,
+        content={"error": "Validation error", "detail": exc.errors()},
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    logger.exception("Unhandled error: %s (path=%s)", exc, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error"},
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +247,7 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 class RecallRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=2000)
     limit: int = Field(default=5, ge=1, le=50)
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     agent: Optional[str] = None
@@ -196,7 +259,7 @@ class CaptureRequest(BaseModel):
 
 
 class StoreRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1, max_length=10000)
     category: str = "other"
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     agent: Optional[str] = None
@@ -313,10 +376,17 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
 
     vectors: List[Optional[List[float]]] = [None] * len(texts)
     if _embedder is not None:
-        try:
-            vectors = await _embedder.embed_batch(texts)
-        except Exception:
-            vectors = [None] * len(texts)
+        for attempt in range(3):
+            try:
+                vectors = await _embedder.embed_batch(texts)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    logger.warning("Batch embed retry %d/3: %s", attempt + 1, exc)
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error("Batch embed failed after 3 attempts: %s", exc)
+                    vectors = [None] * len(texts)
 
     items: List[Dict[str, Any]] = []
     for m, vec in zip(cleaned, vectors):
@@ -375,10 +445,16 @@ async def store(req: StoreRequest) -> Dict[str, Any]:
 
     vector = None
     if _embedder:
-        try:
-            vector = await _embedder.embed(req.text)
-        except Exception:
-            pass
+        for attempt in range(3):
+            try:
+                vector = await _embedder.embed(req.text)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    logger.warning("Embed retry %d/3: %s", attempt + 1, exc)
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error("Embed failed after 3 attempts: %s", exc)
 
     # Rule detection: override category/importance if instruction detected
     category = req.category
@@ -420,10 +496,16 @@ async def store_rule(req: StoreRequest) -> Dict[str, Any]:
 
     vector = None
     if _embedder:
-        try:
-            vector = await _embedder.embed(req.text)
-        except Exception:
-            pass
+        for attempt in range(3):
+            try:
+                vector = await _embedder.embed(req.text)
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    logger.warning("Embed retry %d/3: %s", attempt + 1, exc)
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error("Embed failed after 3 attempts: %s", exc)
 
     res = storage.merge_or_store(
         text=req.text,
@@ -866,6 +948,37 @@ async def health() -> Dict[str, Any]:
         "uptime_seconds": round(time.time() - _start_time, 1),
         "total_memories": total_memories,
         "agents": agents_list,
+    }
+
+
+
+@app.get("/v1/metrics")
+async def metrics(
+    agent: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Return operational metrics for monitoring."""
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    # Per-agent memory counts
+    agent_counts = {}
+    total_memories = 0
+    if agent and agent != "all":
+        s = _get_storage(agent).stats()
+        agent_counts[StoragePool.normalize_key(agent)] = s.get("total_memories", 0)
+        total_memories = s.get("total_memories", 0)
+    else:
+        for aid in _storage_pool.get_all_agents():
+            s = _storage_pool.get(aid).stats()
+            count = s.get("total_memories", 0)
+            agent_counts[aid] = count
+            total_memories += count
+
+    return {
+        "uptime_seconds": round(time.time() - _start_time, 1),
+        "total_memories": total_memories,
+        "agent_counts": agent_counts,
+        "embedding_available": _embedder is not None,
     }
 
 

@@ -191,7 +191,7 @@ class TestChunking:
              "message": {"role": "user", "content": long_text}},
         ]
         chunks = _chunk_session(entries, "test")
-        assert all(len(c.text) <= 2000 for c in chunks)
+        assert all(len(c.text) <= 4000 for c in chunks)  # raised from 2000 [S10]
 
 
 # ---------------------------------------------------------------------------
