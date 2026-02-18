@@ -172,6 +172,20 @@ def _register_custom_temporal() -> None:
     _CUSTOM_TEMPORAL["dun aksam"] = _dun_aksam
 
 
+# Single-word patterns (dateparser fails on these inside longer sentences)
+def _make_day_fn(offset):
+    def fn():
+        d = datetime.now() + timedelta(days=offset)
+        return (d.replace(hour=0, minute=0, second=0), d.replace(hour=23, minute=59, second=59))
+    return fn
+
+_CUSTOM_TEMPORAL["dün"] = _make_day_fn(-1)
+_CUSTOM_TEMPORAL["dun"] = _make_day_fn(-1)
+_CUSTOM_TEMPORAL["bugün"] = _make_day_fn(0)
+_CUSTOM_TEMPORAL["bugun"] = _make_day_fn(0)
+_CUSTOM_TEMPORAL["yarın"] = _make_day_fn(1)
+_CUSTOM_TEMPORAL["yarin"] = _make_day_fn(1)
+
 _register_custom_temporal()
 
 
@@ -189,7 +203,7 @@ def parse_temporal(
 
     # 1. Check custom patterns first
     for pattern, fn in _CUSTOM_TEMPORAL.items():
-        if pattern in text_lower:
+        if re.search(r'(?:^|\s)' + re.escape(pattern) + r'(?:\s|$)', text_lower):
             return fn()
 
     # 2. dateparser
@@ -214,15 +228,30 @@ def parse_temporal(
                 parsed = dateparser.parse(kw, languages=["tr", "en"], settings=settings)
                 if parsed:
                     start = parsed.replace(hour=0, minute=0, second=0)
-                    end = start + timedelta(days=days)
+                    end = start + timedelta(days=days) - timedelta(seconds=1)
                     return (start, end)
 
-        # Single-point parsing
-        parsed = dateparser.parse(text, languages=["tr", "en"], settings=settings)
-        if parsed:
-            start = parsed.replace(hour=0, minute=0, second=0)
-            end = parsed.replace(hour=23, minute=59, second=59)
-            return (start, end)
+        # Single-point parsing — only if text contains a recognisable temporal signal
+        # (prevents dateparser from matching version numbers, random digits, etc.)
+        _TEMPORAL_SIGNALS = re.compile(
+            r'\b(dün|dun|bugün|bugun|yarın|yarin|gün|gun|hafta|ay|yıl|yil|'
+            r'önce|once|geçen|gecen|sonra|'
+            r'yesterday|today|tomorrow|ago|last|next|'
+            r'monday|tuesday|wednesday|thursday|friday|saturday|sunday|'
+            r'pazartesi|salı|sali|çarşamba|carsamba|perşembe|persembe|'
+            r'cuma|cumartesi|pazar|'
+            r'ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|'
+            r'temmuz|ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralik|'
+            r'january|february|march|april|may|june|july|august|'
+            r'september|october|november|december)\b',
+            re.IGNORECASE
+        )
+        if _TEMPORAL_SIGNALS.search(text_lower):
+            parsed = dateparser.parse(text, languages=["tr", "en"], settings=settings)
+            if parsed:
+                start = parsed.replace(hour=0, minute=0, second=0)
+                end = parsed.replace(hour=23, minute=59, second=59)
+                return (start, end)
 
     except ImportError:
         logger.warning("dateparser not installed — temporal parsing disabled")

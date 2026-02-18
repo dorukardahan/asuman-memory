@@ -8,8 +8,8 @@
 | # | Feature | File(s) | Status | Wired | Notes |
 |---|---------|---------|--------|-------|-------|
 | 1 | Hybrid Search (RRF) | `search.py` | ✅ Active | `/v1/recall`, `/v1/search` | 4-layer: semantic 55%, keyword 25%, recency 10%, strength 10% |
-| 2 | Temporal Query Parsing | `turkish.py` → `api.py` → `search.py` | ✅ Active | `/v1/recall` | `parse_temporal()` + `dateparser` lib, Turkish + English, time_range filter |
-| 3 | Search Result Cache | `storage.py`, `search.py` | ✅ Active | Read + invalidate | 3-layer: LRU in-memory + SQLite embedding_cache + search_result_cache (1hr TTL) |
+| 2 | Temporal Query Parsing | `turkish.py` → `api.py` → `search.py` | ✅ Active | `/v1/recall`, `/v1/recall?agent=all` | `parse_temporal()` + `dateparser` lib + custom patterns (dün/bugün/yarın/bu sabah etc.), cache bypass for temporal, cross-agent temporal |
+| 3 | Search Result Cache | `storage.py`, `search.py` | ✅ Active | Read + invalidate | 3-layer: LRU in-memory + SQLite embedding_cache + search_result_cache (1hr TTL). Cache bypassed for temporal queries |
 | 4 | Entity Extraction (NER) | `entities.py` | ✅ Active | `/v1/capture` | 7 types: person, place, org, tech, product, date, concept |
 | 5 | Knowledge Graph | `entities.py` | ✅ Active | `/v1/capture` | 13 typed relations, co-occurrence links |
 | 6 | Contradiction Detection | `conflict_detector.py` | ✅ Active | Via `entities.py` | Temporal fact conflicts, auto-resolution, confidence margin 0.20 |

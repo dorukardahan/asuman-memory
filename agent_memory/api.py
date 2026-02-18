@@ -337,6 +337,12 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
     if _storage_pool is None:
         raise HTTPException(503, "Storage pool not initialised")
 
+    # Temporal-aware cross-agent search
+    time_range = None
+    temporal = parse_temporal(req.query)
+    if temporal is not None:
+        time_range = (temporal[0].timestamp(), temporal[1].timestamp())
+
     all_results: List[Dict[str, Any]] = []
     for agent_id in _storage_pool.get_all_agents():
         try:
@@ -345,6 +351,7 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
                 query=req.query,
                 limit=req.limit,
                 min_score=req.min_score,
+                time_range=time_range,
             )
             for r in results:
                 d = r.to_dict()
@@ -357,7 +364,7 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
     all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     all_results = all_results[: req.limit]
 
-    return {
+    response = {
         "query": req.query,
         "agent": "all",
         "count": len(all_results),
@@ -365,6 +372,12 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
         "results": all_results,
         "cross_agent": True,
     }
+    if time_range is not None:
+        response["time_range"] = {
+            "start": time_range[0],
+            "end": time_range[1],
+        }
+    return response
 
 
 @app.post("/v1/capture")

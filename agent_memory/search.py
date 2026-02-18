@@ -152,15 +152,17 @@ class HybridSearch:
         """
         # 1. Query Normalization + Result Cache Check
         q_norm = normalize_query(query)
-        cached_json = self.storage.get_cached_search_result(
-            query_norm=q_norm, limit_val=limit, min_score=min_score, agent=agent
-        )
-        if cached_json:
-            try:
-                cached_data = json.loads(cached_json)
-                return [SearchResult(**r) for r in cached_data]
-            except Exception as exc:
-                logger.warning("Failed to parse cached search results: %s", exc)
+        # Skip cache for temporal queries — time_range changes daily
+        if time_range is None:
+            cached_json = self.storage.get_cached_search_result(
+                query_norm=q_norm, limit_val=limit, min_score=min_score, agent=agent
+            )
+            if cached_json:
+                try:
+                    cached_data = json.loads(cached_json)
+                    return [SearchResult(**r) for r in cached_data]
+                except Exception as exc:
+                    logger.warning("Failed to parse cached search results: %s", exc)
 
         candidate_limit = max(limit * 4, 20)
 
@@ -287,17 +289,18 @@ class HybridSearch:
             except Exception:
                 pass
 
-        # 3. Store Results in Cache
-        try:
-            results_json = json.dumps([r.to_dict() for r in results])
-            self.storage.cache_search_result(
-                query_norm=q_norm,
-                limit_val=limit,
-                min_score=min_score,
-                agent=agent,
-                results_json=results_json,
-            )
-        except Exception as exc:
-            logger.warning("Failed to cache search results: %s", exc)
+        # 3. Store Results in Cache (skip for temporal queries)
+        if time_range is None:
+            try:
+                results_json = json.dumps([r.to_dict() for r in results])
+                self.storage.cache_search_result(
+                    query_norm=q_norm,
+                    limit_val=limit,
+                    min_score=min_score,
+                    agent=agent,
+                    results_json=results_json,
+                )
+            except Exception as exc:
+                logger.warning("Failed to cache search results: %s", exc)
 
         return results
