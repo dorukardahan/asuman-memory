@@ -5,8 +5,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path.home() / ".agent-memory" / "memory.sqlite"
-OUTPUT = Path.home() / ".openclaw" / "workspace" / "memory" / "whatsapp-memory-export.md"
+DB_PATH = Path.home() / ".asuman" / "memory.sqlite"
+OUTPUT = Path.home() / ".openclaw" / "workspace" / "memory" / "memory-export.md"
 
 conn = sqlite3.connect(str(DB_PATH))
 conn.row_factory = sqlite3.Row
@@ -33,7 +33,7 @@ top_entities = conn.execute("""
 """).fetchall()
 
 lines = []
-lines.append("# WhatsApp Memory Export")
+lines.append("# Agent Memory Export")
 lines.append(f"*Auto-generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
 
 lines.append("## High-Value Memories\n")

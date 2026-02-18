@@ -282,6 +282,11 @@ class ConsolidateRequest(BaseModel):
     agent: Optional[str] = None
 
 
+class GCRequest(BaseModel):
+    agent: Optional[str] = None
+    soft_deleted_days: int = Field(default=30, ge=7, description="Purge memories soft-deleted for this many days")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -612,6 +617,42 @@ async def decay(req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
 
     agent_key = StoragePool.normalize_key(req.agent)
     return {"decayed": decayed, "total": total, "agent": agent_key}
+
+
+@app.post("/v1/gc")
+async def gc(req: GCRequest = GCRequest()) -> Dict[str, Any]:
+    """Permanently DELETE memories soft-deleted for 30+ days and clean orphaned vectors.
+
+    Use ``agent="all"`` to GC across all agent databases.
+    """
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    if req.agent == "all":
+        total_purged = 0
+        total_vectors = 0
+        per_agent: Dict[str, Dict[str, int]] = {}
+        for agent_id in _storage_pool.get_all_agents():
+            storage = _storage_pool.get(agent_id)
+            result = storage.gc_purge(soft_deleted_days=req.soft_deleted_days)
+            total_purged += result["purged_memories"]
+            total_vectors += result["purged_vectors"]
+            per_agent[agent_id] = result
+        return {
+            "purged_memories": total_purged,
+            "purged_vectors": total_vectors,
+            "per_agent": per_agent,
+        }
+
+    storage = _get_storage(req.agent)
+    result = storage.gc_purge(soft_deleted_days=req.soft_deleted_days)
+
+    agent_key = StoragePool.normalize_key(req.agent)
+    return {
+        "purged_memories": result["purged_memories"],
+        "purged_vectors": result["purged_vectors"],
+        "agent": agent_key,
+    }
 
 
 @app.post("/v1/consolidate")

@@ -42,11 +42,18 @@ _SKIP_PREFIXES: tuple[str, ...] = (
 # System noise patterns — gateway connects, test msgs, cron boilerplate [S9, 2026-02-17]
 _NOISE_PATTERNS_RE = [
     re.compile(r"whatsapp gateway (?:connected|disconnected)", re.IGNORECASE),
+    re.compile(r"slack (?:socket mode )?(?:connected|disconnected)", re.IGNORECASE),
     re.compile(r"^GatewayRestart:", re.IGNORECASE),
     re.compile(r"^\[queued messages while agent was busy\]", re.IGNORECASE),
     re.compile(r"^say\s+(?:ok|hello|hi|test|something)\s*$", re.IGNORECASE),
     re.compile(r"^Conversation info \(untrusted metadata\)", re.IGNORECASE),
     re.compile(r"^Replied message \(untrusted", re.IGNORECASE),
+    re.compile(r"^\[cron:", re.IGNORECASE),
+    re.compile(r"^User: \[cron:", re.IGNORECASE),
+    re.compile(r"^User: Conversation info", re.IGNORECASE),
+    re.compile(r"^NO_REPLY$"),
+    re.compile(r"^User: Replied message \(untrusted", re.IGNORECASE),
+    re.compile(r"^User: Pre-compaction memory flush", re.IGNORECASE),
 ]
 
 

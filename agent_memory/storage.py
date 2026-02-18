@@ -401,15 +401,20 @@ class MemoryStorage:
         decay_amount: float = 0.05,
         min_strength: float = 0.3,
     ) -> int:
-        """Aggressive Ebbinghaus decay + boost.
-        - 30+ days unaccessed -> drop to 0.3
+        """Aggressive Ebbinghaus decay + boost with importance-adjusted rate.
+
+        - 30+ days unaccessed -> drop to floor (importance-adjusted)
         - < 7 days old -> protect (min 0.8)
         - Very recent (last 24h) -> boost (+0.1)
-        - 7-30 days -> aggressive decay (-0.15)
+        - 7-30 days -> importance-adjusted decay (low importance decays faster)
+        - GC phase: soft-delete zombies at floor with low importance, unaccessed 14+ days
         """
         conn = self._get_conn()
         now = time.time()
         try:
+            # Phase 1: Importance-adjusted decay
+            # decay_multiplier = 1.0 + (1.0 - importance)
+            # importance=0.2 -> 1.8x decay, importance=0.8 -> 1.2x decay
             cur = conn.execute(
                 """
                 UPDATE memories
@@ -426,8 +431,11 @@ class MemoryStorage:
                        WHEN (COALESCE(last_accessed_at, created_at) >= ? - 604800)
                             THEN MAX(COALESCE(strength, 1.0), 0.8)
 
-                       -- 4. Mid-stale (7-30 days): Aggressive decay
-                       ELSE MAX(COALESCE(strength, 1.0) - 0.15, ?)
+                       -- 4. Mid-stale (7-30 days): Importance-adjusted decay
+                       ELSE MAX(
+                           COALESCE(strength, 1.0) - (0.15 * (1.0 + (1.0 - COALESCE(importance, 0.5)))),
+                           ?
+                       )
                    END
                  WHERE deleted_at IS NULL
                    AND (
@@ -441,14 +449,90 @@ class MemoryStorage:
             conn.commit()
             decayed = int(cur.rowcount or 0)
             logger.info(
-                "Aggressive Decay run: updated=%d (min_strength=%.2f)",
+                "Decay phase 1: updated=%d (min_strength=%.2f, importance-adjusted)",
                 decayed,
                 min_strength,
             )
-            return decayed
+
+            # Phase 2: GC — soft-delete zombies at strength floor with low importance,
+            # unaccessed for 14+ days
+            gc_cur = conn.execute(
+                """
+                UPDATE memories
+                   SET deleted_at = CAST(strftime('%s', 'now') AS INTEGER)
+                 WHERE deleted_at IS NULL
+                   AND strength <= ?
+                   AND importance <= 0.3
+                   AND COALESCE(last_accessed_at, created_at) < ? - 1209600
+                """,
+                (min_strength, now),
+            )
+            conn.commit()
+            gc_count = int(gc_cur.rowcount or 0)
+            if gc_count > 0:
+                logger.info("Decay GC phase: soft-deleted %d zombie memories", gc_count)
+
+            return decayed + gc_count
         except Exception as exc:
             logger.exception("decay_all failed: %s", exc)
             return 0
+
+    # ------------------------------------------------------------------
+    # Garbage collection — permanent delete
+    # ------------------------------------------------------------------
+
+    def gc_purge(self, soft_deleted_days: int = 30) -> Dict[str, int]:
+        """Permanently DELETE memories soft-deleted for *soft_deleted_days*+.
+
+        Also cleans orphaned vectors whose memories no longer exist.
+        Returns dict with counts: purged_memories, purged_vectors.
+        """
+        conn = self._get_conn()
+        now = time.time()
+        cutoff = now - (soft_deleted_days * 86400)
+        try:
+            # Find memories to permanently delete
+            rows = conn.execute(
+                "SELECT id, vector_rowid FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+                (cutoff,),
+            ).fetchall()
+
+            mem_ids = [r["id"] for r in rows]
+            vec_rowids = [r["vector_rowid"] for r in rows if r["vector_rowid"] is not None]
+
+            if not mem_ids:
+                return {"purged_memories": 0, "purged_vectors": 0}
+
+            # Delete from FTS
+            for mid in mem_ids:
+                try:
+                    conn.execute("DELETE FROM memory_fts WHERE id = ?", (mid,))
+                except Exception:
+                    pass
+
+            # Delete from memories table
+            placeholders = ",".join("?" * len(mem_ids))
+            conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", mem_ids)
+
+            # Delete orphaned vectors
+            purged_vecs = 0
+            for vr in vec_rowids:
+                try:
+                    conn.execute("DELETE FROM memory_vectors WHERE rowid = ?", (vr,))
+                    purged_vecs += 1
+                except Exception:
+                    pass
+
+            conn.commit()
+            logger.info(
+                "GC purge: permanently deleted %d memories, %d vectors",
+                len(mem_ids), purged_vecs,
+            )
+            return {"purged_memories": len(mem_ids), "purged_vectors": purged_vecs}
+        except Exception as exc:
+            conn.rollback()
+            logger.exception("gc_purge failed: %s", exc)
+            return {"purged_memories": 0, "purged_vectors": 0}
 
     # ------------------------------------------------------------------
     # Write-time semantic merge
@@ -668,7 +752,7 @@ class MemoryStorage:
             if similarity < min_score:
                 continue
             mem = conn.execute(
-                "SELECT * FROM memories WHERE vector_rowid = ? AND deleted_at IS NULL",
+                "SELECT * FROM memories WHERE vector_rowid = ? AND deleted_at IS NULL AND importance >= 0.3",
                 (r["vec_rowid"],),
             ).fetchone()
             if mem:
@@ -709,7 +793,7 @@ class MemoryStorage:
         results: List[Dict[str, Any]] = []
         for r in rows:
             mem = conn.execute(
-                "SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL", (r["id"],)
+                "SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL AND importance >= 0.3", (r["id"],)
             ).fetchone()
             if mem:
                 d = dict(mem)

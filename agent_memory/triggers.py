@@ -167,6 +167,7 @@ _NOISE_PATTERNS: List[str] = [
 # System noise — gateway connects, test msgs, cron boilerplate
 _SYSTEM_NOISE_PATTERNS = [
     re.compile(r"whatsapp gateway (?:connected|disconnected)", re.IGNORECASE),
+    re.compile(r"slack (?:socket mode )?(?:connected|disconnected)", re.IGNORECASE),
     re.compile(r"^GatewayRestart:", re.IGNORECASE),
     re.compile(r"^\[queued messages", re.IGNORECASE),
     re.compile(r"^say\s+(?:ok|hello|hi|test|something)\s*$", re.IGNORECASE),
@@ -176,7 +177,7 @@ _SYSTEM_NOISE_PATTERNS = [
 
 # Entity stopwords — false positive capitals that inflate entity count
 _ENTITY_STOPWORDS: set = {
-    "System", "User", "Assistant", "WhatsApp", "Session",
+    "System", "User", "Assistant", "WhatsApp", "Slack", "Session",
     "Current", "Return", "Monday", "Tuesday", "Wednesday",
     "Thursday", "Friday", "Saturday", "Sunday",
     "January", "February", "March", "April", "May", "June",

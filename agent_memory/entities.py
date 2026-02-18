@@ -119,6 +119,7 @@ ENTITY_ALIASES: Dict[str, str] = {
     # Project aliases [S14, 2026-02-17]
     "oc": "OpenClaw",
     "wp": "WhatsApp",
+    "sl": "Slack",
     "tg": "Telegram",
     "vps": "VPS",
     "db": "SQLite",
