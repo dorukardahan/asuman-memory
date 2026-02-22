@@ -45,10 +45,10 @@ version_variables = ["agent_memory/__init__.py:__version__"]
 version_toml = ["pyproject.toml:project.version"]
 branch = "main"
 commit_message = "chore(release): {version}"
-build_command = false
+build_command = ""
 
 [tool.semantic_release.changelog]
-template_dir = false
+template_dir = ""
 
 [tool.semantic_release.remote]
 type = "github"
