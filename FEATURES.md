@@ -1,60 +1,67 @@
-# Asuman Memory — Feature Registry
+# Features
 
-> Son güncelleme: 2026-02-19
-> Bu dosya implement edilmiş özelliklerin kaydıdır. Yeni feature eklendiğinde burası da güncellenmelidir.
+## v0.3.0 (Current)
 
-## Implemented Features
+### Search
+- 5-layer hybrid search: semantic + BM25 keyword + recency + strength + importance
+- Reciprocal Rank Fusion (RRF) with k=60
+- Two-pass cross-encoder reranking (primary: balanced/MiniLM, background: quality/BGE-v2-m3)
+- Temporal-aware search: parses time expressions ("yesterday", "last week", "3 days ago")
+- Cross-agent search (`agent=all`)
+- Result caching with TTL
 
-| # | Feature | File(s) | Status | Wired | Notes |
-|---|---------|---------|--------|-------|-------|
-| 1 | Hybrid Search (RRF) | `search.py` | ✅ Active | `/v1/recall`, `/v1/search` | 4-layer: semantic 55%, keyword 25%, recency 10%, strength 10% |
-| 2 | Temporal Query Parsing | `turkish.py` → `api.py` → `search.py` | ✅ Active | `/v1/recall`, `/v1/recall?agent=all` | `parse_temporal()` + `dateparser` lib + custom patterns (dün/bugün/yarın/bu sabah etc.), cache bypass for temporal, cross-agent temporal |
-| 3 | Search Result Cache | `storage.py`, `search.py` | ✅ Active | Read + invalidate | 3-layer: LRU in-memory + SQLite embedding_cache + search_result_cache (1hr TTL). Cache bypassed for temporal queries |
-| 4 | Entity Extraction (NER) | `entities.py` | ✅ Active | `/v1/capture` | 7 types: person, place, org, tech, product, date, concept |
-| 5 | Knowledge Graph | `entities.py` | ✅ Active | `/v1/capture` | 13 typed relations, co-occurrence links |
-| 6 | Contradiction Detection | `conflict_detector.py` | ✅ Active | Via `entities.py` | Temporal fact conflicts, auto-resolution, confidence margin 0.20 |
-| 7 | Temporal Facts | `storage.py` | ✅ Active | Via conflict_detector | `temporal_facts` table: valid_from, valid_to, is_active, typed relations |
-| 8 | Rule/Instruction Capture | `rules.py` | ✅ Active | `/v1/store`, `/v1/rule` | Turkish + English patterns, safewords: `/rule`, `/save`, `📌` |
-| 9 | Importance Scoring | `triggers.py` | ✅ Active | `/v1/capture` | Recalibrated Feb 17 — base 0.20, semantic-first |
-| 10 | Write-time Semantic Merge | `storage.py` | ✅ Active | `/v1/capture`, `/v1/store` | `merge_or_store()`: MD5 + cosine similarity dedup |
-| 11 | Ebbinghaus Decay | `storage.py` | ✅ Active | `/v1/decay` | Importance-adjusted rates, GC phase for zombies |
-| 12 | Consolidation | `api.py` | ✅ Active | `/v1/consolidate` | Unidirectional Jaccard + category-aware thresholds |
-| 13 | Per-Agent DB Routing | `pool.py` | ✅ Active | All endpoints | `memory.sqlite` (main) + `memory-{agent_id}.sqlite` per specialist |
-| 14 | Cross-Agent Search | `api.py` | ✅ Active | `/v1/recall?agent=all` | Queries all agent DBs, merges by score |
-| 15 | GC (Garbage Collection) | `api.py`, `storage.py` | ✅ Active | `/v1/gc` | `gc_purge()`: permanent delete of soft-deleted memories after N days |
-| 16 | Turkish NLP | `turkish.py` | ⚠️ Partial | Only temporal parsing wired | `lemmatize()`, `ascii_fold()`, `normalize_text()` available but not used in search |
-| 17 | Audit Logging | `middleware.py` | ✅ Active | Global | `/var/log/asuman-memory-audit.log` |
-| 18 | Analytics | `api.py` | ✅ Active | `/v1/stats`, `/v1/metrics` | Memory counts, entity stats, operational metrics |
+### Storage
+- SQLite + sqlite-vec for vector storage (cosine distance)
+- FTS5 with trigram tokenizer for keyword search
+- Per-agent database isolation (StoragePool)
+- Write-time semantic merge (cosine ≥ 0.85 dedup)
+- Soft-delete with permanent GC
 
-## NOT Implemented (and why)
+### Embedding
+- Any OpenAI-compatible embedding API (local llama.cpp or cloud)
+- 3-tier caching: LRU in-memory → SQLite persistent → API call
+- Resilient batch embedding with individual fallback
+- Configurable text truncation (`max_embed_chars`)
+- Vectorless backfill script for failed embeddings
+- 3-retry with exponential backoff
 
-| Feature | Reason | Worth doing? |
-|---------|--------|-------------|
-| HYDE (Hypothetical Document Embedding) | RRF 4-layer already performs well | Low — marginal improvement for complexity |
-| Cross-encoder Reranking | RRF fusion is sufficient at current scale (4814 memories) | Low — revisit if >50K memories |
-| Proactive Memory Push | Complex, needs gateway integration | Medium — would require hook or bootstrap changes |
-| Turkish Lemmatization in Search | `zeyrek` is slow, FTS5 trigram tokenizer handles Turkish OK | Low — can enable later if search quality drops |
+### Knowledge Graph
+- Regex-based entity extraction (names, phones, emails, dates, tech terms)
+- 12 typed relation categories
+- Temporal facts with validity periods
+- Conflict detection for exclusive relations (lives_in, works_at, status)
+- Auto-resolution with confidence margin
 
-## Dead Code
+### NLP (Turkish + English)
+- Morphological analysis via zeyrek (Turkish lemmatization)
+- Temporal expression parsing (dateparser + custom Turkish patterns)
+- ASCII folding (ç→c, ğ→g, ı→i, ö→o, ş→s, ü→u)
+- 70+ Turkish stopwords
+- Trigger detection: 30+ Turkish + 15+ English patterns
 
-| File | Status | Notes |
-|------|--------|-------|
-| `ingest.py` | Superseded | Batch JSONL ingestion — functionality absorbed into `/v1/capture`. Keep for manual bulk imports via `scripts/initial_load.py`. |
+### Memory Lifecycle
+- Ebbinghaus spaced-repetition decay (importance-adjusted)
+- Consolidation: union-find merge for similar memories
+- GC: soft-delete weak/stale memories, permanent purge after 30 days
+- Importance scoring: decision markers, conversation detection, cron output capping
 
-## API Endpoints (11 total)
+### Security
+- API key authentication (constant-time compare)
+- Rate limiting: 120 req/min per IP (sliding window)
+- Audit logging to file
+- CORS: localhost-only
+- Health endpoint: auth-free
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/v1/recall` | Hybrid search (temporal-aware) |
-| POST | `/v1/capture` | Batch ingest with semantic merge |
-| POST | `/v1/store` | Store single memory |
-| DELETE | `/v1/forget` | Delete memory |
-| GET | `/v1/search` | Interactive search |
-| POST | `/v1/rule` | Store instruction/rule |
-| POST | `/v1/decay` | Run Ebbinghaus decay |
-| POST | `/v1/consolidate` | Deduplicate + archive stale |
-| POST | `/v1/gc` | Permanent delete of soft-deleted |
-| GET | `/v1/stats` | Statistics |
-| GET | `/v1/health` | Health check |
-| GET | `/v1/agents` | List agent databases |
-| GET | `/v1/metrics` | Operational metrics |
+### API
+- FastAPI with Pydantic models
+- Export/Import endpoints for backup and migration
+- Per-agent routing (`?agent=<id>`)
+- Cross-agent operations (`agent=all`)
+- Centralized error handling with JSON responses
+
+### Scripts
+- `openclaw_sync.py` — incremental session sync with state tracking
+- `backfill_vectors.py` — embed vectorless memories (cron-friendly)
+- `rescore_cron_memories.py` — recalibrate importance scores for automated content
+- `backup_db.sh` — daily SQLite backup
+- `export-to-workspace.py` — export highlights to workspace files

@@ -1,7 +1,7 @@
 """FastAPI HTTP API for the OpenClaw memory system.
 
 Endpoints:
-    POST   /v1/recall        -- Hybrid search (semantic + BM25 + recency + strength)
+    POST   /v1/recall        -- Hybrid search (semantic + BM25 + recency + strength + importance)
     POST   /v1/capture       -- Batch ingest (write-time semantic merge)
     POST   /v1/store         -- Store one memory (write-time semantic merge)
     DELETE /v1/forget        -- Delete memory
@@ -46,6 +46,7 @@ from .config import Config, load_config
 from .embeddings import OpenRouterEmbeddings
 from .entities import KnowledgeGraph
 from .pool import StoragePool
+from .reranker import CrossEncoderReranker
 from .search import HybridSearch, SearchWeights
 from .storage import MemoryStorage
 from .rules import RuleDetector
@@ -67,11 +68,14 @@ _start_time: float = 0.0
 _search_cache: Dict[str, HybridSearch] = {}
 _kg_cache: Dict[str, KnowledgeGraph] = {}
 _search_weights: Optional[SearchWeights] = None
+_reranker: Optional[CrossEncoderReranker] = None
+_bg_reranker: Optional[CrossEncoderReranker] = None
 _rule_detector = RuleDetector()
 
 # Audit logging handler (file-based, graceful fallback for CI/test)
 try:
-    _audit_handler = logging.FileHandler("/var/log/asuman-memory-audit.log")
+    _audit_log_path = os.environ.get("AGENT_MEMORY_AUDIT_LOG", "/var/log/agent-memory-audit.log")
+    _audit_handler = logging.FileHandler(_audit_log_path)
     _audit_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logging.getLogger("audit").addHandler(_audit_handler)
 except (PermissionError, FileNotFoundError):
@@ -101,6 +105,11 @@ def _get_search(agent: Optional[str] = None) -> HybridSearch:
             storage=storage,
             embedder=_embedder,
             weights=_search_weights,
+            reranker=_reranker,
+            rerank_weight=(_config.reranker_weight if _config else 0.20),
+            bg_reranker=_bg_reranker,
+            bg_two_pass_enabled=(_config.reranker_two_pass_enabled if _config else False),
+            bg_rerank_weight=(_config.reranker_two_pass_weight if _config else 0.35),
         )
     return _search_cache[key]
 
@@ -123,7 +132,7 @@ def _get_kg(agent: Optional[str] = None) -> KnowledgeGraph:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic."""
-    global _storage_pool, _embedder, _config, _start_time, _search_weights
+    global _storage_pool, _embedder, _config, _start_time, _search_weights, _reranker, _bg_reranker
 
     _config = load_config()
     errors = _config.validate()
@@ -157,12 +166,64 @@ async def lifespan(app: FastAPI):
         keyword=_config.weight_keyword,
         recency=_config.weight_recency,
         strength=_config.weight_strength,
+        importance=_config.weight_importance,
     )
+
+    _reranker = CrossEncoderReranker(
+        enabled=_config.reranker_enabled,
+        model_name=_config.reranker_model,
+        top_k=_config.reranker_top_k,
+        torch_threads=_config.reranker_threads,
+        max_doc_chars=_config.reranker_max_doc_chars,
+    )
+
+    if _config.reranker_enabled and _config.reranker_prewarm:
+        t0 = time.time()
+        ok = _reranker.warmup()
+        dt = round(time.time() - t0, 2)
+        if ok:
+            logger.info("Primary reranker prewarmed in %ss", dt)
+        else:
+            logger.warning("Primary reranker prewarm failed in %ss (will fallback)", dt)
+
+    _bg_reranker = None
+    if _config.reranker_two_pass_enabled:
+        primary_model = CrossEncoderReranker._resolve_model_name(_config.reranker_model)
+        bg_model = CrossEncoderReranker._resolve_model_name(_config.reranker_two_pass_model)
+        if bg_model != primary_model:
+            _bg_reranker = CrossEncoderReranker(
+                enabled=True,
+                model_name=_config.reranker_two_pass_model,
+                top_k=_config.reranker_two_pass_top_k,
+                torch_threads=_config.reranker_two_pass_threads,
+                max_doc_chars=_config.reranker_two_pass_max_doc_chars,
+            )
+            if _config.reranker_two_pass_prewarm:
+                t0 = time.time()
+                ok = _bg_reranker.warmup()
+                dt = round(time.time() - t0, 2)
+                if ok:
+                    logger.info("Two-pass background reranker prewarmed in %ss", dt)
+                else:
+                    logger.warning("Two-pass background prewarm failed in %ss", dt)
+
+    _start_time = time.time()
 
     agents = _storage_pool.get_all_agents()
     logger.info(
-        "Memory API ready -- base_dir=%s agents=%s model=%s",
-        base_dir, agents, _config.embedding_model,
+        "Memory API ready -- base_dir=%s agents=%s emb_model=%s reranker=%s/%s top_k=%s threads=%s max_chars=%s prewarm=%s two_pass=%s bg_model=%s bg_top_k=%s",
+        base_dir,
+        agents,
+        _config.embedding_model,
+        "on" if _config.reranker_enabled else "off",
+        _config.reranker_model,
+        _config.reranker_top_k,
+        _config.reranker_threads,
+        _config.reranker_max_doc_chars,
+        _config.reranker_prewarm,
+        _config.reranker_two_pass_enabled,
+        _config.reranker_two_pass_model,
+        _config.reranker_two_pass_top_k,
     )
 
     # Start warmup background task

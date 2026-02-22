@@ -194,7 +194,7 @@ async def sync(args: argparse.Namespace) -> Dict[str, Any]:
 
             if embedder and texts:
                 try:
-                    vectors = await embedder.embed_batch(texts)
+                    vectors = await embedder.embed_batch_resilient(texts, max_sub_batch=8)
                 except Exception as exc:
                     logger.warning("Embedding failed for %s/%s: %s", agent_id, sid[:8], exc)
 

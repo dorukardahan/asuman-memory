@@ -175,6 +175,41 @@ _SYSTEM_NOISE_PATTERNS = [
     re.compile(r"^Replied message \(untrusted", re.IGNORECASE),
 ]
 
+
+# Cron / automated output patterns — cap at 0.30
+_CRON_NOISE_PATTERNS = [
+    re.compile(r"^\[cron:", re.IGNORECASE),
+    re.compile(r"/steward-(?:engage|post|digest)", re.IGNORECASE),
+    re.compile(r"Bureau Engage", re.IGNORECASE),
+    re.compile(r"steward-engage", re.IGNORECASE),
+    re.compile(r"^HEARTBEAT_OK\s*$", re.IGNORECASE),
+    re.compile(r"\[cron:[a-f0-9-]+\s", re.IGNORECASE),
+    re.compile(r"cron job .+ just completed", re.IGNORECASE),
+    re.compile(r"Return your summary as plain text", re.IGNORECASE),
+    re.compile(r"Current time: \w+day,", re.IGNORECASE),
+]
+_CRON_NOISE_MAX = 0.30
+
+# Conversation source indicators — messages from User via Slack/WhatsApp
+_CONVERSATION_SOURCE_PATTERNS = [
+    re.compile(r"Slack DM from User:", re.IGNORECASE),
+    # Add your own WhatsApp/phone patterns here if needed:
+    # re.compile(r"\[WhatsApp \+1234567890", re.IGNORECASE),
+    re.compile(r"Conversation info.*\"conversation_label\"", re.IGNORECASE | re.DOTALL),
+]
+_CONVERSATION_BONUS = 0.15
+
+_TURKISH_DECISION_PATTERNS = [
+    r"(?:şöyle|böyle)\s+(?:yapalım|yapacağız|yapıyoruz|gidiyoruz)",
+    r"tamam\s+(?:öyle|böyle|şöyle)\s+(?:yapalım|olsun)",
+    r"(?:bence|bana göre|benim fikrim)",
+    r"(?:planımız|plan\s+şu|strateji)",
+    r"(?:bu\s+kısım|bu\s+şekilde|şu\s+şekilde).*(?:olacak|olsun|yapacağız)",
+    r"(?:devam\s+edelim|başlayalım|geçelim)",
+    r"(?:öncelik|priority|sıra)",
+]
+_TURKISH_DECISION_BONUS = 0.20
+
 # Entity stopwords — false positive capitals that inflate entity count
 _ENTITY_STOPWORDS: set = {
     "System", "User", "Assistant", "WhatsApp", "Slack", "Session",
@@ -195,50 +230,55 @@ def _is_system_noise(text_lower: str) -> bool:
 def score_importance(text: str, metadata: Optional[Dict] = None) -> float:
     """Calculate importance score for a message (0.0 – 1.0).
 
-    Recalibrated 2026-02-17: base lowered to 0.20, system noise floors at 0.10,
-    operational event markers added, entity stopwords filter, reduced role bonuses.
-    Target distribution: 15% at 0.0-0.2, 35% at 0.2-0.4, 25% at 0.4-0.6,
-    15% at 0.6-0.8, 10% at 0.8-1.0.
+    Recalibrated 2026-02-20: cron penalty, conversation boost, Turkish decisions.
     """
-    score = 0.20  # was 0.50
+    score = 0.20
     text_lower = text.lower().strip()
+    metadata = metadata or {}
 
     # --- early exits for noise ---
     for pattern in _NOISE_PATTERNS:
         if re.match(pattern, text_lower):
-            return 0.05  # noise floor
+            return 0.05
 
     if _is_system_noise(text_lower):
-        return 0.10  # system noise floor
+        return 0.10
 
-    # --- positive signals ---
+    # --- cron penalty: detect and cap early ---
+    is_cron = any(p.search(text) for p in _CRON_NOISE_PATTERNS)
+    source = metadata.get("source", "")
+    if source == "cron":
+        is_cron = True
 
-    # Questions (reduced from +0.10 to +0.05)
+    # --- conversation boost ---
+    is_conversation = any(p.search(text) for p in _CONVERSATION_SOURCE_PATTERNS)
+    if source in ("slack-dm", "whatsapp"):
+        is_conversation = True
+    if is_conversation:
+        score += _CONVERSATION_BONUS
+
     if "?" in text and len(text) > 10:
         score += 0.05
 
-    # Importance markers (keep +0.25 — explicit signals)
     if any(m in text_lower for m in _IMPORTANCE_MARKERS):
         score += 0.25
 
-    # Decision markers (keep +0.20)
     if any(m in text_lower for m in _DECISION_MARKERS):
         score += 0.20
 
-    # Task markers (+0.15)
+    if any(re.search(p, text_lower) for p in _TURKISH_DECISION_PATTERNS):
+        score += _TURKISH_DECISION_BONUS
+
     if any(m in text_lower for m in _TASK_MARKERS):
         score += 0.15
 
-    # Operational event markers (NEW)
     if any(m in text_lower for m in _OPS_MARKERS):
         score += 0.20
 
-    # Named entities — with stopword filter, min 3 chars
-    caps = set(re.findall(r"\b[A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,}\b", text))
+    caps = set(re.findall(r"[A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,}", text))
     caps -= _ENTITY_STOPWORDS
-    score += min(0.10, len(caps) * 0.02)  # was 0.15/0.03
+    score += min(0.10, len(caps) * 0.02)
 
-    # Substantive length (raised thresholds)
     word_count = len(text.split())
     if word_count > 150:
         score += 0.08
@@ -247,13 +287,21 @@ def score_importance(text: str, metadata: Optional[Dict] = None) -> float:
     elif word_count < 8:
         score -= 0.05
 
-    # Role bonus — REDUCED
-    if metadata:
-        role = metadata.get("role", "")
-        if role == "user":
-            score += 0.05    # was 0.10
-        elif role == "qa_pair":
-            score += 0.08    # was 0.15
+    role = metadata.get("role", "")
+    if role == "user":
+        score += 0.05
+    elif role == "qa_pair":
+        score += 0.08
+
+    if is_cron:
+        score = min(score, _CRON_NOISE_MAX)
+
+    has_decision = (
+        any(m in text_lower for m in _DECISION_MARKERS)
+        or any(re.search(p, text_lower) for p in _TURKISH_DECISION_PATTERNS)
+    )
+    if has_decision and not is_cron:
+        score = max(score, 0.70)
 
     return max(0.05, min(1.0, score))
 

@@ -106,9 +106,8 @@ KNOWN_TECH: Set[str] = {
     # Frameworks & tools
     "whatsapp", "telegram", "discord", "fastapi", "uvicorn", "celery",
     "openclaw", "llama-server", "tmux", "ssh",
-    # Project-specific
-    "senti", "track", "myapp", "bureau", "project",
-    "asuman", "x-accounts", "domain-search",
+    # Add your own project-specific entities below:
+    # "my-project", "my-service",
 }  # expanded [S14, 2026-02-17]
 
 # ---------------------------------------------------------------------------

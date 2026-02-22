@@ -773,7 +773,7 @@ class MemoryStorage:
         conn = self._get_conn()
 
         # Escape the query for FTS5 — wrap each token in double quotes
-        safe_query = " ".join(
+        safe_query = " OR ".join(
             f'"{tok}"' for tok in query.split() if tok.strip()
         )
         if not safe_query:

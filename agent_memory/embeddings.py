@@ -151,7 +151,14 @@ class OpenRouterEmbeddings:
     # ------------------------------------------------------------------
 
     async def embed(self, text: str) -> List[float]:
-        """Embed a single text string. Returns a vector (list of floats)."""
+        """Embed a single text string. Returns a vector (list of floats).
+
+        Text is truncated to ``max_embed_chars`` (default 3500) before embedding
+        to avoid exceeding the llama-server per-slot context window.
+        """
+        cfg = load_config()
+        text = text[:cfg.max_embed_chars]
+
         # 1. Check in-memory LRU cache
         cached = self._cache_get(text)
         if cached is not None:
@@ -179,7 +186,12 @@ class OpenRouterEmbeddings:
         return vec
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple texts in one API call. Returns list of vectors."""
+        """Embed multiple texts in one API call. Returns list of vectors.
+
+        Texts are truncated to ``max_embed_chars`` before embedding.
+        """
+        cfg = load_config()
+        texts = [t[:cfg.max_embed_chars] for t in texts]
         results: List[Optional[List[float]]] = [None] * len(texts)
         uncached_indices: List[int] = []
         uncached_texts: List[str] = []
@@ -221,3 +233,59 @@ class OpenRouterEmbeddings:
         """Convenience: return embedding as a numpy array."""
         vec = await self.embed(text)
         return np.array(vec, dtype=np.float32)
+
+    async def embed_batch_resilient(
+        self,
+        texts: List[str],
+        max_sub_batch: int = 8,
+    ) -> List[Optional[List[float]]]:
+        """Embed multiple texts with fallback to individual embeds on failure.
+
+        Strategy:
+        1. Try batch embed first (respecting max_sub_batch size)
+        2. On any failure, fall back to individual embeds for that sub-batch
+        3. Returns partial results - some vectors may be None if individual embed fails
+
+        Args:
+            texts: List of text strings to embed
+            max_sub_batch: Maximum number of texts per API call (to avoid timeouts)
+
+        Returns:
+            List of vectors (List[float]) or None for failed embeds
+        """
+        if not texts:
+            return []
+
+        results: List[Optional[List[float]]] = [None] * len(texts)
+
+        # Process in sub-batches to avoid timeouts on large batches
+        for sub_start in range(0, len(texts), max_sub_batch):
+            sub_end = min(sub_start + max_sub_batch, len(texts))
+            sub_indices = list(range(sub_start, sub_end))
+            sub_texts = texts[sub_start:sub_end]
+
+            # Try batch embed for this sub-batch
+            try:
+                sub_vectors = await self.embed_batch(sub_texts)
+                for idx, vec in zip(sub_indices, sub_vectors):
+                    results[idx] = vec
+                continue  # Success - move to next sub-batch
+            except Exception as batch_exc:
+                logger.warning(
+                    "Batch embed failed for sub-batch %d-%d, falling back to individual: %s",
+                    sub_start, sub_end - 1, batch_exc
+                )
+
+            # Fallback: embed individually
+            for idx, text in zip(sub_indices, sub_texts):
+                try:
+                    vec = await self.embed(text)
+                    results[idx] = vec
+                except Exception as single_exc:
+                    logger.warning(
+                        "Individual embed failed for text at index %d: %s",
+                        idx, single_exc
+                    )
+                    # Keep as None - caller can decide what to do
+
+        return results
