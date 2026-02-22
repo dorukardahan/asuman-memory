@@ -19,6 +19,7 @@ from agent_memory.search import HybridSearch
 def _set_test_env(monkeypatch):
     """Set a dummy API key so tests never fail on missing key."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-for-pytest")
+    monkeypatch.delenv("AGENT_MEMORY_API_KEY", raising=False)
 
 
 # ---------------------------------------------------------------------------
