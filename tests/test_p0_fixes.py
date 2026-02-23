@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -231,7 +232,7 @@ class TestScriptSmoke:
     def test_sync_help(self):
         root = Path(__file__).resolve().parents[1]
         proc = subprocess.run(
-            [".venv/bin/python", "scripts/openclaw_sync.py", "--help"],
+            [sys.executable, "scripts/openclaw_sync.py", "--help"],
             cwd=root,
             capture_output=True,
             text=True,
