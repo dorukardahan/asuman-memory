@@ -1,0 +1,163 @@
+/**
+ * session-end-capture hook — Capture session content on session end.
+ */
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import { readdirSync } from "node:fs";
+
+const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
+const MEMORY_API = `${MEMORY_API_BASE}/v1`;
+const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
+
+const OPENCLAW_HOME =
+  process.env.OPENCLAW_HOME || path.join(process.env.HOME || ".", ".openclaw");
+const DEFAULT_WORKSPACE_DIR =
+  process.env.OPENCLAW_WORKSPACE_DIR || path.join(OPENCLAW_HOME, "workspace");
+
+function resolveWorkspaceDir(agentId = "main") {
+  if (agentId === "main") return DEFAULT_WORKSPACE_DIR;
+  if (DEFAULT_WORKSPACE_DIR.endsWith("workspace")) {
+    return `${DEFAULT_WORKSPACE_DIR}-${agentId}`;
+  }
+  return path.join(OPENCLAW_HOME, `workspace-${agentId}`);
+}
+
+function findSessionFile(sessionId, agentId = "main") {
+  if (!sessionId) return null;
+
+  // Search order: per-agent dir first, then global fallback
+  const searchDirs = [
+    path.join(OPENCLAW_HOME, "agents", agentId, "sessions"),
+    path.join(OPENCLAW_HOME, "sessions"),
+  ];
+
+  for (const sessionsDir of searchDirs) {
+    try {
+      const files = readdirSync(sessionsDir);
+      for (const f of files) {
+        if (f.includes(sessionId) && f.endsWith(".jsonl")) {
+          return path.join(sessionsDir, f);
+        }
+      }
+    } catch {
+      // ignore missing dirs
+    }
+  }
+  return null;
+}
+
+async function getSessionMessages(sessionFilePath, count = 15) {
+  try {
+    const raw = await fs.readFile(sessionFilePath, "utf-8");
+    const lines = raw.trim().split("\n");
+    const messages = [];
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== "message") continue;
+        const msg = entry.message;
+        if (!msg || !msg.content) continue;
+
+        const role = msg.role;
+        if (role !== "user" && role !== "assistant") continue;
+
+        const text = Array.isArray(msg.content)
+          ? msg.content.find((c) => c.type === "text")?.text
+          : msg.content;
+
+        if (text && text.length > 10 && !text.startsWith("/")) {
+          messages.push({ role, text: text.slice(0, 1000) });
+        }
+      } catch {
+        // skip malformed JSONL line
+      }
+    }
+
+    return messages.slice(-count);
+  } catch {
+    return [];
+  }
+}
+
+function buildQAPairs(messages) {
+  const pairs = [];
+  for (let i = 0; i < messages.length - 1; i++) {
+    if (messages[i].role === "user" && messages[i + 1].role === "assistant") {
+      pairs.push({
+        role: "qa_pair",
+        text: `User: ${messages[i].text}\nAssistant: ${messages[i + 1].text}`,
+      });
+      i++;
+    } else {
+      pairs.push(messages[i]);
+    }
+  }
+  const lastMsg = messages[messages.length - 1];
+  if (lastMsg && (pairs.length === 0 || pairs[pairs.length - 1].text !== lastMsg.text)) {
+    pairs.push(lastMsg);
+  }
+  return pairs;
+}
+
+const sessionEndCaptureHook = async (event, ctx) => {
+  const sessionId = event?.sessionId || ctx?.sessionId;
+  const agentId = ctx?.agentId || "main";
+
+  if (!sessionId) return;
+
+  const sessionFile = findSessionFile(sessionId, agentId);
+  if (!sessionFile) {
+    console.warn(`[session-end-capture] no session file found for ${sessionId}`);
+    return;
+  }
+
+  const messages = await getSessionMessages(sessionFile, 15);
+  if (messages.length < 2) return;
+
+  const pairs = buildQAPairs(messages);
+
+  try {
+    await fetch(`${MEMORY_API}/capture`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": MEMORY_API_KEY,
+      },
+      body: JSON.stringify({
+        messages: pairs.map((p) => ({ role: p.role || "assistant", text: p.text })),
+        agent: agentId,
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (err) {
+    console.warn(`[session-end-capture] capture failed: ${err.message}`);
+  }
+
+  try {
+    const workspaceDir = resolveWorkspaceDir(agentId);
+    const memoryDir = path.join(workspaceDir, "memory");
+    await fs.mkdir(memoryDir, { recursive: true });
+
+    const lines = [
+      "# Last Session Summary",
+      "",
+      `- **Session ID:** ${sessionId}`,
+      `- **Agent:** ${agentId}`,
+      `- **Captured:** ${new Date().toISOString()}`,
+      "",
+      "## Conversation",
+      "",
+    ];
+    for (const m of messages.slice(-10)) {
+      lines.push(`**${m.role}:** ${m.text.slice(0, 300)}`);
+      lines.push("");
+    }
+    await fs.writeFile(path.join(memoryDir, "last-session.md"), lines.join("\n"), "utf-8");
+  } catch (err) {
+    console.warn(`[session-end-capture] write failed: ${err.message}`);
+  }
+};
+
+export default sessionEndCaptureHook;

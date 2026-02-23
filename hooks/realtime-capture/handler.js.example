@@ -1,0 +1,85 @@
+const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
+const MEMORY_API = `${MEMORY_API_BASE}/v1`;
+const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
+
+const DECISION_MARKERS = [
+  /\bkarar\b/i,
+  /\byapalım\b/i,
+  /\byapacağız\b/i,
+  /\btamam\b/i,
+  /\banlaştık\b/i,
+  /\bdecided\b/i,
+  /\blet'?s do\b/i,
+];
+
+const CRON_PATTERNS = [
+  /^\[cron:/i,
+  /steward-engage/i,
+  /steward-post/i,
+  /\/steward-/i,
+  /HEARTBEAT_OK/i,
+];
+
+function isCronNoise(text = "") {
+  return CRON_PATTERNS.some((p) => p.test(text));
+}
+
+function isDecision(text = "") {
+  return DECISION_MARKERS.some((p) => p.test(text));
+}
+
+function scoreImportance(text = "") {
+  if (!text || text.length < 15 || isCronNoise(text)) return 0;
+  let score = 0.35;
+  if (isDecision(text)) score = Math.max(score, 0.9);
+  if (text.length > 120) score += 0.05;
+  return Math.min(1.0, score);
+}
+
+let lastUserMessage = null;
+let lastUserTs = 0;
+
+async function store(text, category, importance, agent = "main") {
+  try {
+    await fetch(`${MEMORY_API}/store`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": MEMORY_API_KEY,
+      },
+      body: JSON.stringify({ text: text.slice(0, 3000), category, importance, agent }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    // non-critical
+  }
+}
+
+const realtimeCaptureHook = async (event, ctx) => {
+  if (event.from !== undefined && event.content !== undefined) {
+    const content = (event.content || "").trim();
+    if (!content || content.startsWith("/") || isCronNoise(content)) return;
+
+    lastUserMessage = content;
+    lastUserTs = Date.now();
+
+    const agentId = ctx?.agentId || "main";
+
+    if (isDecision(content)) {
+      await store(`[Decision] ${content}`, "decision", 0.9, agentId);
+    } else if (content.length > 50) {
+      // Store substantive user messages (not just "ok" or "tamam")
+      const imp = scoreImportance(content);
+      if (imp >= 0.4) {
+        await store(content, "conversation", imp, agentId);
+      }
+    }
+    return;
+  }
+
+  // Note: llm_output event doesn't exist in OpenClaw. Assistant capture
+  // handled by session-end-capture hook. Here we only capture user messages
+  // and decisions in real-time — that's the critical path.
+};
+
+export default realtimeCaptureHook;

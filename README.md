@@ -88,6 +88,19 @@ Set `OPENROUTER_BASE_URL=http://127.0.0.1:8090/v1` in `.env` for local mode.
 
 All endpoints accept `?agent=<id>` for per-agent routing. Use `agent=all` for cross-agent operations.
 
+## Hooks
+
+OpenClaw hook examples for Memory API integration are available in [`hooks/`](./hooks/).
+
+They show how to:
+
+- capture messages and session summaries into memory,
+- inject recalled context on bootstrap,
+- persist context around compaction/session transitions,
+- capture important tool outputs and subagent failures.
+
+See [`hooks/README.md`](./hooks/README.md) for full setup and configuration instructions.
+
 ## Search Architecture
 
 ```text

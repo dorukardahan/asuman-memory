@@ -1,0 +1,147 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
+const MEMORY_API = `${MEMORY_API_BASE}/v1`;
+const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
+const DEFAULT_WORKSPACE_DIR =
+  process.env.OPENCLAW_WORKSPACE_DIR || "/path/to/openclaw/workspace";
+
+/**
+ * Derive agent ID from workspace directory path.
+ *   /path/to/openclaw/workspace        -> "main"
+ *   /path/to/openclaw/workspace-bureau -> "bureau"
+ */
+function getAgentId(workspaceDir) {
+  const base = path.basename(workspaceDir);
+  if (base === "workspace") return "main";
+  if (base.startsWith("workspace-")) return base.replace("workspace-", "");
+  return "main";
+}
+
+async function resolveSessionFile(sessionFilePath) {
+  try {
+    await fs.access(sessionFilePath);
+    return sessionFilePath;
+  } catch {
+    // OpenClaw renames session files to *.reset.{timestamp} on /new
+    const dir = path.dirname(sessionFilePath);
+    const base = path.basename(sessionFilePath);
+    const entries = await fs.readdir(dir);
+    const resetFile = entries
+      .filter((f) => f.startsWith(base + ".reset."))
+      .sort()
+      .pop(); // most recent
+    if (resetFile) {
+      console.warn(`[pre-session-save] original gone, using ${resetFile}`);
+      return path.join(dir, resetFile);
+    }
+    return null;
+  }
+}
+
+async function getRecentMessages(sessionFilePath, count = 5) {
+  try {
+    const resolved = await resolveSessionFile(sessionFilePath);
+    if (!resolved) {
+      console.warn(`[pre-session-save] no session file found for ${sessionFilePath}`);
+      return [];
+    }
+    const raw = await fs.readFile(resolved, "utf-8");
+    const lines = raw.trim().split("\n");
+    const messages = [];
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === "message" && entry.message) {
+          const msg = entry.message;
+          if ((msg.role === "user" || msg.role === "assistant") && msg.content) {
+            const text = Array.isArray(msg.content)
+              ? msg.content.find((c) => c.type === "text")?.text
+              : msg.content;
+            if (text && !text.startsWith("/")) {
+              messages.push({ role: msg.role, text: text.slice(0, 500) });
+            }
+          }
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    return messages.slice(-count);
+  } catch (err) {
+    console.warn(`[pre-session-save] getRecentMessages error: ${err.message}`);
+    return [];
+  }
+}
+
+async function captureToMemoryAPI(content, agentId = "main") {
+  try {
+    await fetch(`${MEMORY_API}/capture`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": MEMORY_API_KEY,
+      },
+      body: JSON.stringify({
+        messages: [{ role: "assistant", text: content }],
+        agent: agentId,
+        metadata: { source: "pre-session-save-hook", timestamp: new Date().toISOString() },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    // non-critical
+  }
+}
+
+const preSessionSaveHook = async (event) => {
+  if (event.type !== "command" || event.action !== "new") return;
+
+  console.warn(`[pre-session-save] triggered for ${event.sessionKey}`);
+
+  const context = event.context || {};
+  const cfg = context.cfg;
+  const workspaceDir = context.workspaceDir || cfg?.workspace?.dir || DEFAULT_WORKSPACE_DIR;
+  const memoryDir = path.join(workspaceDir, "memory");
+
+  await fs.mkdir(memoryDir, { recursive: true });
+
+  const sessionEntry = context.previousSessionEntry || context.sessionEntry || {};
+  const sessionFile = sessionEntry.sessionFile;
+
+  console.warn(`[pre-session-save] sessionFile: ${sessionFile || "NONE"}`);
+
+  const snapshot = {
+    timestamp: new Date().toISOString(),
+    sessionKey: event.sessionKey || "unknown",
+    recentMessages: [],
+  };
+
+  if (sessionFile) {
+    snapshot.recentMessages = await getRecentMessages(sessionFile, 5);
+    console.warn(`[pre-session-save] parsed ${snapshot.recentMessages.length} messages`);
+  } else {
+    console.warn("[pre-session-save] no sessionFile — skipping");
+  }
+
+  if (snapshot.recentMessages.length > 0) {
+    const summaryParts = snapshot.recentMessages.map((m) => `${m.role}: ${m.text}`);
+    const summaryText = `Session snapshot (${snapshot.timestamp}):\n${summaryParts.join("\n")}`;
+
+    const snapshotPath = path.join(memoryDir, "critical-context-snapshot.json");
+    await fs.writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf-8");
+    console.warn(`[pre-session-save] snapshot written to ${snapshotPath}`);
+
+    // NOTE: Removed captureToMemoryAPI() call here — built-in session-memory
+    // hook already captures to memory/YYYY-MM-DD-slug.md on command:new.
+    // Having both created duplicate entries. This hook now only writes the
+    // snapshot JSON (used by post-compaction-restore). [S4, 2026-02-17]
+  } else {
+    console.warn("[pre-session-save] no messages to save — skipping write");
+  }
+};
+
+export default preSessionSaveHook;
