@@ -52,7 +52,7 @@ class TestRRFFusion:
 class TestHybridSearch:
     async def test_keyword_only(self, storage):
         """Search with only BM25 (no embedder)."""
-        storage.store_memory(text="User yarın toplantı var dedi", category="user")
+        storage.store_memory(text="Ahmet yarın toplantı var dedi", category="user")
         storage.store_memory(text="Hava bugün çok güzel", category="user")
 
         search = HybridSearch(storage=storage, embedder=None)

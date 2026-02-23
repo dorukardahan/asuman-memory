@@ -11,7 +11,7 @@
 # Log directory: $REPO/logs/ (created automatically by scripts).
 # Override: set LOG_DIR in your .env or adjust paths below.
 
-REPO=/opt/asuman/whatsapp-memory
+REPO=/opt/agent-memory  # >>> CHANGE to your install path <<<
 LOG_DIR=$REPO/logs
 
 # ─── Session Sync (every 30 min) ───────────────────────────────────────

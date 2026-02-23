@@ -14,9 +14,9 @@ from agent_memory.entities import (
 
 class TestEntityExtractor:
     def test_known_person(self, extractor):
-        result = extractor.extract("User ile konuştum")
+        result = extractor.extract("Ahmet ile konuştum")
         names = [e.text.lower() for e in result.people]
-        assert "user" in names
+        assert "ahmet" in names
 
     def test_known_place(self, extractor):
         result = extractor.extract("istanbul'a gidiyorum")
@@ -70,12 +70,12 @@ class TestEntityExtractor:
         assert "bugün" in dates
 
     def test_multiple_entity_types(self, extractor):
-        text = "User, Istanbul'da Anthropic ile Python projesi yapıyor"
+        text = "Ahmet, Istanbul'da Anthropic ile Python projesi yapıyor"
         result = extractor.extract(text)
         assert len(result.all_entities()) >= 3
 
     def test_extracted_entities_to_dict(self, extractor):
-        result = extractor.extract("User Python kullanıyor")
+        result = extractor.extract("Ahmet Python kullanıyor")
         d = result.to_dict()
         assert "people" in d
         assert "tech_terms" in d
@@ -89,9 +89,9 @@ class TestEntityExtractor:
 class TestDedup:
     def test_case_insensitive_dedup(self):
         entities = [
-            Entity(text="User", label="person"),
-            Entity(text="user", label="person"),
-            Entity(text="USER", label="person"),
+            Entity(text="Ahmet", label="person"),
+            Entity(text="ahmet", label="person"),
+            Entity(text="AHMET", label="person"),
         ]
         result = _dedupe(entities)
         assert len(result) == 1
@@ -114,27 +114,27 @@ class TestDedup:
 
 class TestKnowledgeGraph:
     def test_process_text_stores_entities(self, knowledge_graph, tmp_storage):
-        knowledge_graph.process_text("User Python ile çalışıyor")
-        entities = tmp_storage.search_entities("user", limit=5)
+        knowledge_graph.process_text("Ahmet Python ile çalışıyor")
+        entities = tmp_storage.search_entities("ahmet", limit=5)
         assert len(entities) >= 1
 
     def test_process_text_creates_relationships(self, knowledge_graph, tmp_storage):
         knowledge_graph.process_text(
-            "User works on Python projects"
+            "Ahmet Istanbul'da Anthropic ile çalışıyor"
         )
         stats = tmp_storage.stats()
         assert stats["relationships"] > 0
 
     def test_search_entities(self, knowledge_graph):
-        knowledge_graph.process_text("User ile konuştum")
-        results = knowledge_graph.search("user")
+        knowledge_graph.process_text("Ahmet ile konuştum")
+        results = knowledge_graph.search("ahmet")
         assert len(results) >= 1
-        assert results[0]["name"].lower() == "user"
+        assert results[0]["name"].lower() == "ahmet"
 
     def test_entity_mention_count_increases(self, knowledge_graph, tmp_storage):
-        knowledge_graph.process_text("User ile konuştum")
-        knowledge_graph.process_text("User yine aradı")
-        entities = tmp_storage.search_entities("User", limit=1)
+        knowledge_graph.process_text("Ahmet ile konuştum")
+        knowledge_graph.process_text("Ahmet yine aradı")
+        entities = tmp_storage.search_entities("Ahmet", limit=1)
         assert len(entities) >= 1  # entity found at least once
 
     def test_co_occurrence_linking(self, knowledge_graph, tmp_storage):

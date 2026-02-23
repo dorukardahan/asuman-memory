@@ -153,7 +153,7 @@ class TestStore:
 @pytest.mark.asyncio
 class TestRecall:
     async def test_recall_basic(self, client):
-        await client.post("/v1/store", json={"text": "User yarın toplantı var"})
+        await client.post("/v1/store", json={"text": "Ahmet yarın toplantı var"})
 
         resp = await client.post("/v1/recall", json={
             "query": "toplantı",

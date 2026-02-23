@@ -76,7 +76,11 @@ _rule_detector = RuleDetector()
 
 # Audit logging handler (file-based, graceful fallback for CI/test)
 try:
-    _audit_log_path = os.environ.get("AGENT_MEMORY_AUDIT_LOG", "/root/.asuman/agent-memory-audit.log")
+    _default_audit_dir = os.environ.get("AGENT_MEMORY_DATA_DIR") or (
+        str(Path.home() / ".asuman") if (Path.home() / ".asuman").exists() and not (Path.home() / ".agent-memory").exists()
+        else str(Path.home() / ".agent-memory")
+    )
+    _audit_log_path = os.environ.get("AGENT_MEMORY_AUDIT_LOG", os.path.join(_default_audit_dir, "agent-memory-audit.log"))
     _audit_handler = logging.FileHandler(_audit_log_path)
     _audit_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logging.getLogger("audit").addHandler(_audit_handler)

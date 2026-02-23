@@ -33,7 +33,7 @@ ProtectSystem=strict
 PrivateTmp=yes
 ProtectHome=read-only
 # >>> CHANGE to your DB directory <<<
-ReadWritePaths=/home/your-user/.asuman
+ReadWritePaths=/home/your-user/.agent-memory
 CapabilityBoundingSet=
 UMask=0077
 

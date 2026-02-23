@@ -103,7 +103,7 @@ def knowledge_graph(tmp_storage):
 # ---------------------------------------------------------------------------
 
 SAMPLE_MESSAGES = [
-    {"role": "user", "text": "User ile yarın toplantı var, hatırlat lütfen"},
+    {"role": "user", "text": "Ahmet ile yarın toplantı var, hatırlat lütfen"},
     {"role": "assistant", "text": "Tamam, yarın toplantınız var. Hatırlatırım."},
     {"role": "user", "text": "İstanbul'a ne zaman gidiyoruz?"},
     {"role": "assistant", "text": "Geçen konuşmada 15 Mart demiştiniz."},
