@@ -9,7 +9,7 @@ description = "Conversational memory system for AI agents — hybrid search, Tur
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "Asuman Project"}]
+authors = [{name = "Agent Asuman"}]
 
 dependencies = [
     "requests>=2.31.0",
