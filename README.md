@@ -180,8 +180,8 @@ All configuration is environment-driven. `AGENT_MEMORY_*` variables are canonica
 | `AGENT_MEMORY_CONFIG` | _unset_ | Optional JSON config file path loaded before env vars |
 | `OPENROUTER_API_KEY` | `""` | Embedding API key (required for semantic embeddings) |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Embedding API base URL |
-| `AGENT_MEMORY_MODEL` | `qwen/qwen3-embedding-8b` | Embedding model name |
-| `AGENT_MEMORY_DIMENSIONS` | `4096` | Embedding dimensions |
+| `AGENT_MEMORY_MODEL` | `qwen/qwen3-embedding-4b` | Embedding model name |
+| `AGENT_MEMORY_DIMENSIONS` | `2560` | Embedding dimensions (must match model) |
 | `AGENT_MEMORY_MAX_EMBED_CHARS` | `3500` | Truncate text before embedding |
 | `AGENT_MEMORY_DB` | `$HOME/.agent-memory/memory.sqlite`* | SQLite path |
 | `AGENT_MEMORY_HOST` | `127.0.0.1` | API bind address |
@@ -231,6 +231,7 @@ cat crontab.example
 |-----|----------|---------|
 | Session sync | `*/30 * * * *` | Pull OpenClaw sessions → memory |
 | Ebbinghaus decay | `0 2 * * *` | Reduce memory strength over time |
+| Consolidation | `30 2 * * 0` | Deduplicate similar + archive weak memories |
 | GC purge | `0 3 * * 0` | Delete soft-deleted memories > 30 days |
 | Workspace export | `0 4 * * 0` | Export summaries to agent workspace dirs |
 | Vectorless backfill | `0 */6 * * *` | Re-embed failed memories |
@@ -338,6 +339,102 @@ All memory operations are handled by the Agent Memory API via hooks — OpenClaw
 - [ ] Disable OpenClaw native `memorySearch`
 - [ ] Back up SQLite DB regularly (`/v1/export` or `scripts/backup_db.sh`)
 - [ ] Monitor: `/v1/health`, `/v1/metrics`, `journalctl -u asuman-memory`
+
+## API Usage Examples
+
+### Store a memory
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/store \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $AGENT_MEMORY_API_KEY" \
+  -d '{"text": "User prefers dark mode", "agent": "main", "source": "preference", "importance": 0.8}'
+```
+
+### Recall memories
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/recall \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $AGENT_MEMORY_API_KEY" \
+  -d '{"query": "UI preferences", "agent": "main", "limit": 5}'
+```
+
+### Batch capture messages
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/capture \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $AGENT_MEMORY_API_KEY" \
+  -d '{"messages": [
+    {"role": "user", "content": "Deploy to production"},
+    {"role": "assistant", "content": "Deployed v2.1 to prod at 14:30"}
+  ], "agent": "main"}'
+```
+
+### Health check
+
+```bash
+curl -s http://127.0.0.1:8787/v1/health
+# {"status":"ok","checks":{"storage":true,"embedding":true}}
+```
+
+### Stats
+
+```bash
+curl -s -H "X-API-Key: $AGENT_MEMORY_API_KEY" http://127.0.0.1:8787/v1/stats?agent=main
+```
+
+## Full Setup Guide (for AI agents)
+
+If you're an AI agent setting up this system, follow these steps in order:
+
+```bash
+# 1. Clone and install
+git clone https://github.com/dorukardahan/asuman-memory.git
+cd asuman-memory
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Detect hardware and configure
+./scripts/detect-hardware.sh            # see recommended profile
+./scripts/detect-hardware.sh --apply    # write to .env
+cp .env.example .env                    # if not exists
+# Edit .env: set AGENT_MEMORY_API_KEY (generate a strong random key)
+# OPENROUTER_API_KEY is only needed for cloud embeddings
+
+# 3. Download embedding model (pick based on detect-hardware output)
+# For standard profile (Qwen3-Embedding-4B):
+mkdir -p /opt/models
+# Download from: https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF
+# Place .gguf file in /opt/models/
+
+# 4. Install systemd services
+sudo cp embedding-server.service.example /etc/systemd/system/embedding-server.service
+sudo cp asuman-memory.service.example /etc/systemd/system/asuman-memory.service
+# Edit both: fix paths to match your install location
+sudo systemctl daemon-reload
+sudo systemctl enable --now embedding-server
+sudo systemctl enable --now asuman-memory
+
+# 5. Verify
+curl -s http://127.0.0.1:8787/v1/health
+# Should return: {"status":"ok","checks":{"storage":true,"embedding":true}}
+
+# 6. Install cron jobs
+cat crontab.example                     # review paths first
+(crontab -l 2>/dev/null; cat crontab.example) | crontab -
+
+# 7. (Optional) OpenClaw integration
+# Copy hooks from hooks/ directory to ~/.openclaw/hooks/
+# Disable native memory: set memorySearch.enabled = false in openclaw.json
+# Run: ./scripts/provision-agent-memory.sh
+
+# 8. (Optional) Multi-agent provisioning
+./scripts/provision-agent-memory.sh --status
+./scripts/provision-agent-memory.sh
+```
 
 ## Tests
 
