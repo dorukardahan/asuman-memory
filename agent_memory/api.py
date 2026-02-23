@@ -43,6 +43,7 @@ from starlette.responses import JSONResponse
 from .middleware import APIKeyMiddleware, RateLimitMiddleware, AuditLogMiddleware
 
 from .config import Config, load_config
+from .embed_worker import EmbedWorker
 from .embeddings import OpenRouterEmbeddings
 from .entities import KnowledgeGraph
 from .pool import StoragePool
@@ -61,6 +62,7 @@ logger = logging.getLogger(__name__)
 
 _storage_pool: Optional[StoragePool] = None
 _embedder: Optional[OpenRouterEmbeddings] = None
+_embed_worker: Optional[EmbedWorker] = None
 _config: Optional[Config] = None
 _start_time: float = 0.0
 
@@ -135,7 +137,7 @@ def _get_kg(agent: Optional[str] = None) -> KnowledgeGraph:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic."""
-    global _storage_pool, _embedder, _config, _start_time, _search_weights, _reranker, _bg_reranker
+    global _storage_pool, _embedder, _embed_worker, _config, _start_time, _search_weights, _reranker, _bg_reranker
 
     _config = load_config()
     errors = _config.validate()
@@ -212,6 +214,27 @@ async def lifespan(app: FastAPI):
 
     _start_time = time.time()
 
+    _embed_worker = None
+    if _config.embed_worker_enabled:
+        if _embedder is None:
+            logger.info("Embed worker enabled but embedder unavailable; worker not started")
+        else:
+            try:
+                _embed_worker = EmbedWorker(
+                    storage_pool=_storage_pool,
+                    embedder=_embedder,
+                    interval_seconds=_config.embed_worker_interval,
+                    batch_size=2,
+                    max_sub_batch=2,
+                    sleep_between=1.0,
+                )
+                _embed_worker.start()
+            except Exception as exc:
+                logger.warning("Failed to start embed worker: %s", exc)
+                _embed_worker = None
+    else:
+        logger.info("Embed worker disabled via AGENT_MEMORY_EMBED_WORKER_ENABLED")
+
     agents = _storage_pool.get_all_agents()
     logger.info(
         "Memory API ready -- base_dir=%s agents=%s emb_model=%s reranker=%s/%s top_k=%s threads=%s max_chars=%s prewarm=%s two_pass=%s bg_model=%s bg_top_k=%s",
@@ -235,6 +258,14 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _embed_worker is not None:
+        try:
+            await _embed_worker.stop()
+        except Exception as exc:
+            logger.warning("Embed worker shutdown error: %s", exc)
+        finally:
+            _embed_worker = None
+
     _storage_pool.close_all()
     _search_cache.clear()
     _kg_cache.clear()
