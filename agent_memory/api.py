@@ -74,12 +74,12 @@ _rule_detector = RuleDetector()
 
 # Audit logging handler (file-based, graceful fallback for CI/test)
 try:
-    _audit_log_path = os.environ.get("AGENT_MEMORY_AUDIT_LOG", "/var/log/agent-memory-audit.log")
+    _audit_log_path = os.environ.get("AGENT_MEMORY_AUDIT_LOG", "/root/.asuman/agent-memory-audit.log")
     _audit_handler = logging.FileHandler(_audit_log_path)
     _audit_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logging.getLogger("audit").addHandler(_audit_handler)
-except (PermissionError, FileNotFoundError):
-    pass  # CI/test environment - audit log not available
+except OSError:
+    pass  # CI/test or hardened environment - audit log not available
 logging.getLogger("audit").setLevel(logging.INFO)
 
 
