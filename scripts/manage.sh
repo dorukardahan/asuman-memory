@@ -28,7 +28,16 @@ if [ -f "${ENV_FILE}" ]; then
   set +a
 fi
 
-DB_PATH="${AGENT_MEMORY_DB:-${HOME}/.asuman/memory.sqlite}"
+# Resolve DB path: env var > ~/.agent-memory > legacy ~/.asuman
+if [ -n "${AGENT_MEMORY_DB:-}" ]; then
+  DB_PATH="$AGENT_MEMORY_DB"
+elif [ -d "${HOME}/.agent-memory" ]; then
+  DB_PATH="${HOME}/.agent-memory/memory.sqlite"
+elif [ -d "${HOME}/.asuman" ]; then
+  DB_PATH="${HOME}/.asuman/memory.sqlite"
+else
+  DB_PATH="${HOME}/.agent-memory/memory.sqlite"
+fi
 
 case "${1:-}" in
   start)

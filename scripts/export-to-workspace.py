@@ -5,7 +5,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-_data_dir = Path(os.environ.get("AGENT_MEMORY_DATA_DIR", Path.home() / ".asuman"))
+def _resolve_data_dir() -> Path:
+    """Resolve data dir: env var > ~/.agent-memory > legacy ~/.asuman."""
+    env_dir = os.environ.get("AGENT_MEMORY_DATA_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    new_dir = Path.home() / ".agent-memory"
+    legacy_dir = Path.home() / ".asuman"
+    if legacy_dir.is_dir() and not new_dir.is_dir():
+        return legacy_dir
+    return new_dir
+
+
+_data_dir = _resolve_data_dir()
 DB_PATH = Path(os.environ.get("AGENT_MEMORY_DB", _data_dir / "memory.sqlite"))
 _workspace = Path(os.environ.get("OPENCLAW_WORKSPACE", Path.home() / ".openclaw" / "workspace"))
 OUTPUT = _workspace / "memory" / "memory-export.md"

@@ -133,7 +133,7 @@ AGENT_MEMORY_DIMENSIONS=3072
 .venv/bin/python scripts/reindex_embeddings.py --dry-run
 
 # For a specific agent DB:
-AGENT_MEMORY_DB=~/.asuman/memory-codex.sqlite .venv/bin/python scripts/reindex_embeddings.py
+AGENT_MEMORY_DB=~/.agent-memory/memory-codex.sqlite .venv/bin/python scripts/reindex_embeddings.py
 ```
 
 > **Note on paths:** All scripts read DB and workspace paths from environment variables (`AGENT_MEMORY_DB`, `AGENT_MEMORY_DATA_DIR`, `OPENCLAW_WORKSPACE`) with sensible defaults. Set these in your `.env` file if your paths differ from the defaults.
@@ -424,8 +424,9 @@ cp .env.example .env
 
 # Generate a strong API key and save it
 AGENT_MEMORY_API_KEY=$(openssl rand -base64 32)
-echo "$AGENT_MEMORY_API_KEY" > ~/.asuman/memory-api-key
-chmod 600 ~/.asuman/memory-api-key
+mkdir -p ~/.agent-memory
+echo "$AGENT_MEMORY_API_KEY" > ~/.agent-memory/memory-api-key
+chmod 600 ~/.agent-memory/memory-api-key
 # Set it in .env:
 sed -i "s|^AGENT_MEMORY_API_KEY=.*|AGENT_MEMORY_API_KEY=$AGENT_MEMORY_API_KEY|" .env
 

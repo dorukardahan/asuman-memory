@@ -20,7 +20,18 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.environ.get("AGENT_MEMORY_DB", os.path.expanduser("~/.asuman/memory.sqlite"))
+def _resolve_db_path() -> str:
+    """Resolve DB path: env var > ~/.agent-memory > legacy ~/.asuman."""
+    if os.environ.get("AGENT_MEMORY_DB"):
+        return os.path.expanduser(os.environ["AGENT_MEMORY_DB"])
+    new_dir = os.path.expanduser("~/.agent-memory")
+    legacy_dir = os.path.expanduser("~/.asuman")
+    if os.path.isdir(legacy_dir) and not os.path.isdir(new_dir):
+        return os.path.join(legacy_dir, "memory.sqlite")
+    return os.path.join(new_dir, "memory.sqlite")
+
+
+DB_PATH = _resolve_db_path()
 OUTPUT_DIR = Path(os.environ.get("OPENCLAW_WORKSPACE", os.path.expanduser("~/.openclaw/workspace"))) / "memory"
 OUTPUT_FILE = OUTPUT_DIR / "whatsapp-highlights.md"
 

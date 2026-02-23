@@ -6,7 +6,16 @@
 
 set -euo pipefail
 
-MEMORY_DIR="${AGENT_MEMORY_DATA_DIR:-${HOME}/.asuman}"
+# Resolve data dir: env var > ~/.agent-memory > legacy ~/.asuman
+if [ -n "${AGENT_MEMORY_DATA_DIR:-}" ]; then
+  MEMORY_DIR="$AGENT_MEMORY_DATA_DIR"
+elif [ -d "${HOME}/.agent-memory" ]; then
+  MEMORY_DIR="${HOME}/.agent-memory"
+elif [ -d "${HOME}/.asuman" ]; then
+  MEMORY_DIR="${HOME}/.asuman"
+else
+  MEMORY_DIR="${HOME}/.agent-memory"
+fi
 BACKUP_DIR="${MEMORY_DIR}/backups"
 CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 DATE=$(date +%Y-%m-%d)

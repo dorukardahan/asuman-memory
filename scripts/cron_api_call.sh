@@ -4,7 +4,16 @@
 # Example: cron_api_call.sh /v1/decay '{"agent":"all"}'
 set -euo pipefail
 
-API_KEY_FILE="${AGENT_MEMORY_API_KEY_FILE:-$HOME/.asuman/memory-api-key}"
+# Resolve API key file: env var > ~/.agent-memory > legacy ~/.asuman
+if [ -n "${AGENT_MEMORY_API_KEY_FILE:-}" ]; then
+  API_KEY_FILE="$AGENT_MEMORY_API_KEY_FILE"
+elif [ -f "$HOME/.agent-memory/memory-api-key" ]; then
+  API_KEY_FILE="$HOME/.agent-memory/memory-api-key"
+elif [ -f "$HOME/.asuman/memory-api-key" ]; then
+  API_KEY_FILE="$HOME/.asuman/memory-api-key"
+else
+  API_KEY_FILE="$HOME/.agent-memory/memory-api-key"
+fi
 if [ ! -f "$API_KEY_FILE" ]; then
   echo "ERROR: API key file not found: $API_KEY_FILE" >&2
   exit 1

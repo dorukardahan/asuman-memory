@@ -17,7 +17,16 @@ set -euo pipefail
 OPENCLAW_DIR="${HOME}/.openclaw"
 CONFIG_FILE="${OPENCLAW_DIR}/openclaw.json"
 MEMORY_API="http://localhost:8787/v1"
-API_KEY_FILE="${AGENT_MEMORY_API_KEY_FILE:-$HOME/.asuman/memory-api-key}"
+# Resolve API key file: env var > ~/.agent-memory > legacy ~/.asuman
+if [ -n "${AGENT_MEMORY_API_KEY_FILE:-}" ]; then
+  API_KEY_FILE="$AGENT_MEMORY_API_KEY_FILE"
+elif [ -f "$HOME/.agent-memory/memory-api-key" ]; then
+  API_KEY_FILE="$HOME/.agent-memory/memory-api-key"
+elif [ -f "$HOME/.asuman/memory-api-key" ]; then
+  API_KEY_FILE="$HOME/.asuman/memory-api-key"
+else
+  API_KEY_FILE="$HOME/.agent-memory/memory-api-key"
+fi
 API_KEY=""
 if [ -f "$API_KEY_FILE" ]; then
   API_KEY=$(cat "$API_KEY_FILE")

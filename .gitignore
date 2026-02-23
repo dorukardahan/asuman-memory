@@ -17,3 +17,4 @@ env/
 .realtime_state.json
 .ruff_cache/
 BUILD-PLAN.md
+logs/

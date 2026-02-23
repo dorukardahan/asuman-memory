@@ -16,7 +16,7 @@ Usage:
   python3 scripts/reindex_embeddings.py
 
   # Override for a specific agent DB:
-  AGENT_MEMORY_DB=~/.asuman/memory-codex.sqlite python3 scripts/reindex_embeddings.py
+  AGENT_MEMORY_DB=~/.agent-memory/memory-codex.sqlite python3 scripts/reindex_embeddings.py
 
   # Dry run (show what would happen):
   python3 scripts/reindex_embeddings.py --dry-run
@@ -32,7 +32,18 @@ import time
 import requests
 
 # ─── Configuration (from environment, matching agent_memory/config.py) ───
-DB_PATH = os.environ.get("AGENT_MEMORY_DB", os.path.expanduser("~/.asuman/memory.sqlite"))
+def _resolve_db_path() -> str:
+    """Resolve DB path: env var > ~/.agent-memory > legacy ~/.asuman."""
+    if os.environ.get("AGENT_MEMORY_DB"):
+        return os.path.expanduser(os.environ["AGENT_MEMORY_DB"])
+    new_dir = os.path.expanduser("~/.agent-memory")
+    legacy_dir = os.path.expanduser("~/.asuman")
+    if os.path.isdir(legacy_dir) and not os.path.isdir(new_dir):
+        return os.path.join(legacy_dir, "memory.sqlite")
+    return os.path.join(new_dir, "memory.sqlite")
+
+
+DB_PATH = _resolve_db_path()
 EMBED_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "http://localhost:8090/v1").rstrip("/")
 EMBED_URL = f"{EMBED_BASE_URL}/embeddings"
 EMBED_MODEL = os.environ.get("AGENT_MEMORY_MODEL", "qwen/qwen3-embedding-4b")

@@ -4,11 +4,15 @@
 #
 # Prerequisites:
 #   - Memory API running (systemctl start asuman-memory)
-#   - .env file configured (or /root/.asuman/memory.env)
-#   - API key file at $HOME/.asuman/memory-api-key (or set AGENT_MEMORY_API_KEY_FILE)
+#   - .env file configured
+#   - API key file at ~/.agent-memory/memory-api-key (or set AGENT_MEMORY_API_KEY_FILE)
 #   - Embedding server running (llama-server on port 8090)
+#
+# Log directory: $REPO/logs/ (created automatically by scripts).
+# Override: set LOG_DIR in your .env or adjust paths below.
 
 REPO=/opt/asuman/whatsapp-memory
+LOG_DIR=$REPO/logs
 
 # ─── Session Sync (every 30 min) ───────────────────────────────────────
 # Pulls new OpenClaw sessions → memory via openclaw_sync.py
@@ -16,24 +20,24 @@ REPO=/opt/asuman/whatsapp-memory
 
 # ─── Ebbinghaus Decay (daily 2am) ──────────────────────────────────────
 # Reduces memory strength over time (spaced repetition model)
-0 2 * * * $REPO/scripts/cron_api_call.sh /v1/decay '{"agent":"all"}' >> /var/log/asuman-memory-decay.log 2>&1
+0 2 * * * mkdir -p $LOG_DIR && $REPO/scripts/cron_api_call.sh /v1/decay '{"agent":"all"}' >> $LOG_DIR/decay.log 2>&1
 
 # ─── GC Purge (weekly Sunday 3am) ──────────────────────────────────────
 # Permanently deletes soft-deleted memories older than 30 days
-0 3 * * 0 $REPO/scripts/cron_api_call.sh /v1/gc '{"agent":"all","soft_deleted_days":30}' >> /var/log/asuman-memory-gc.log 2>&1
+0 3 * * 0 mkdir -p $LOG_DIR && $REPO/scripts/cron_api_call.sh /v1/gc '{"agent":"all","soft_deleted_days":30}' >> $LOG_DIR/gc.log 2>&1
 
 # ─── Consolidation (weekly Sunday 2:30am) ───────────────────────────────
 # Deduplicate similar memories and archive weak ones
-30 2 * * 0 $REPO/scripts/cron_api_call.sh /v1/consolidate '{"agent":"all"}' >> /var/log/asuman-memory-consolidate.log 2>&1
+30 2 * * 0 mkdir -p $LOG_DIR && $REPO/scripts/cron_api_call.sh /v1/consolidate '{"agent":"all"}' >> $LOG_DIR/consolidate.log 2>&1
 
 # ─── Export to Workspace (weekly Sunday 4am) ────────────────────────────
 # Exports memory summaries to OpenClaw workspace dirs for agent context
-0 4 * * 0 $REPO/.venv/bin/python $REPO/scripts/export-to-workspace.py >> /tmp/memory-export.log 2>&1
+0 4 * * 0 mkdir -p $LOG_DIR && $REPO/.venv/bin/python $REPO/scripts/export-to-workspace.py >> $LOG_DIR/export.log 2>&1
 
 # ─── Vectorless Backfill (every 6 hours) ───────────────────────────────
 # Re-embeds memories that failed initial embedding (uses flock to prevent overlap)
-0 */6 * * * flock -n /tmp/asuman-backfill.lock bash -c 'set -a; . $REPO/.env; set +a; $REPO/.venv/bin/python $REPO/scripts/backfill_vectors.py --agent all --batch-size 2 --max-sub-batch 2 --sleep-between-batches 1.0' >> /var/log/asuman-memory-backfill.log 2>&1
+0 */6 * * * flock -n /tmp/asuman-backfill.lock bash -c 'set -a; . $REPO/.env; set +a; mkdir -p $REPO/logs; $REPO/.venv/bin/python $REPO/scripts/backfill_vectors.py --agent all --batch-size 2 --max-sub-batch 2 --sleep-between-batches 1.0' >> $LOG_DIR/backfill.log 2>&1
 
 # ─── SQLite Backup (daily 7am) ─────────────────────────────────────────
 # Hot backup of all SQLite databases
-0 7 * * * $REPO/scripts/backup_db.sh >> /var/log/asuman-memory-backup.log 2>&1
+0 7 * * * mkdir -p $LOG_DIR && $REPO/scripts/backup_db.sh >> $LOG_DIR/backup.log 2>&1
