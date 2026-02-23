@@ -1,11 +1,14 @@
 """Trim whatsapp-memory export to top 100 high-value + 30 recent + top 50 entities."""
+import os
 import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path.home() / ".asuman" / "memory.sqlite"
-OUTPUT = Path.home() / ".openclaw" / "workspace" / "memory" / "memory-export.md"
+_data_dir = Path(os.environ.get("AGENT_MEMORY_DATA_DIR", Path.home() / ".asuman"))
+DB_PATH = Path(os.environ.get("AGENT_MEMORY_DB", _data_dir / "memory.sqlite"))
+_workspace = Path(os.environ.get("OPENCLAW_WORKSPACE", Path.home() / ".openclaw" / "workspace"))
+OUTPUT = _workspace / "memory" / "memory-export.md"
 
 conn = sqlite3.connect(str(DB_PATH))
 conn.row_factory = sqlite3.Row

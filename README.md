@@ -85,11 +85,22 @@ The included script detects your system resources and recommends the best model:
 ### Local setup
 
 ```bash
-# Download model (pick one based on your profile)
-# Qwen3: https://huggingface.co/Qwen/Qwen3-Embedding-{0.6B,4B,8B}-GGUF
-# Gemma:  https://huggingface.co/ggml-org/EmbeddingGemma-300M-GGUF
+# 1. Install llama.cpp (llama-server binary)
+# Option A: Build from source
+git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+cmake -B build && cmake --build build --target llama-server -j
+sudo cp build/bin/llama-server /usr/local/bin/
 
-# Run (standard profile example)
+# Option B: Download prebuilt release
+# https://github.com/ggml-org/llama.cpp/releases
+
+# 2. Download embedding model (pick one based on your profile)
+mkdir -p /opt/models && cd /opt/models
+# Standard: wget https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/Qwen3-Embedding-4B-Q8_0.gguf
+# Light:    wget https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf
+# Heavy:    wget https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF/resolve/main/Qwen3-Embedding-8B-Q8_0.gguf
+
+# 3. Run (standard profile example)
 llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
   --embedding --pooling last --host 0.0.0.0 --port 8090 \
   --ctx-size 8192 --batch-size 2048 --threads 12 --parallel 2
@@ -115,8 +126,17 @@ AGENT_MEMORY_DIMENSIONS=3072
 ⚠️ **Changing embedding dimensions requires re-embedding all memories.** If you switch profiles, run:
 
 ```bash
+# Reads config from environment / .env — no hardcoded values
 .venv/bin/python scripts/reindex_embeddings.py
+
+# Dry run first to see what would happen:
+.venv/bin/python scripts/reindex_embeddings.py --dry-run
+
+# For a specific agent DB:
+AGENT_MEMORY_DB=~/.asuman/memory-codex.sqlite .venv/bin/python scripts/reindex_embeddings.py
 ```
+
+> **Note on paths:** All scripts read DB and workspace paths from environment variables (`AGENT_MEMORY_DB`, `AGENT_MEMORY_DATA_DIR`, `OPENCLAW_WORKSPACE`) with sensible defaults. Set these in your `.env` file if your paths differ from the defaults.
 
 > **Important:** With `--parallel N`, each slot gets `ctx-size / N` tokens. Set `ctx-size` high enough for your longest texts, or use `AGENT_MEMORY_MAX_EMBED_CHARS` to truncate.
 
@@ -400,10 +420,18 @@ pip install -r requirements.txt
 # 2. Configure environment
 cp .env.example .env
 ./scripts/detect-hardware.sh            # see recommended profile
-./scripts/detect-hardware.sh --apply    # updates model + dimensions in .env
-# Edit .env: set AGENT_MEMORY_API_KEY (generate a strong random key)
-# For local embedding: set OPENROUTER_BASE_URL=http://127.0.0.1:8090/v1
-# For cloud embedding: set OPENROUTER_API_KEY=your-key (keep default URL)
+./scripts/detect-hardware.sh --apply    # updates model, dimensions, and base URL in .env
+
+# Generate a strong API key and save it
+AGENT_MEMORY_API_KEY=$(openssl rand -base64 32)
+echo "$AGENT_MEMORY_API_KEY" > ~/.asuman/memory-api-key
+chmod 600 ~/.asuman/memory-api-key
+# Set it in .env:
+sed -i "s|^AGENT_MEMORY_API_KEY=.*|AGENT_MEMORY_API_KEY=$AGENT_MEMORY_API_KEY|" .env
+
+# For cloud embedding (instead of local): set OPENROUTER_API_KEY in .env
+# NOTE: .env must be clean KEY=VALUE format — no inline comments (#)
+#       systemd EnvironmentFile does not support inline comments
 
 # 3. Download embedding model (pick based on detect-hardware output)
 mkdir -p /opt/models && cd /opt/models

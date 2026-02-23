@@ -1,40 +1,64 @@
 #!/usr/bin/env python3
-"""Re-embed all memories using the new local llama-server.
+"""Re-embed all memories with current embedding configuration.
+
+Reads model, dimensions, and API URL from environment / .env file.
+Safe for profile changes (e.g. switching from 4B to 8B).
 
 Steps:
 1. Read all memories from SQLite
-2. Drop old memory_vectors table (4096-dim)
-3. Create new memory_vectors table (1024-dim)
-4. Re-embed each memory via llama-server /v1/embeddings
-5. Insert new vectors
+2. Drop old memory_vectors table
+3. Create new table with configured dimensions
+4. Re-embed each memory via the configured embedding endpoint
+5. Update vector_rowid references
 
-Usage: python3 scripts/reindex_embeddings.py
+Usage:
+  # Uses settings from .env / environment:
+  python3 scripts/reindex_embeddings.py
+
+  # Override for a specific agent DB:
+  AGENT_MEMORY_DB=~/.asuman/memory-codex.sqlite python3 scripts/reindex_embeddings.py
+
+  # Dry run (show what would happen):
+  python3 scripts/reindex_embeddings.py --dry-run
 """
 
+import argparse
 import os
 import sqlite3
 import struct
+import sys
 import time
 
 import requests
 
+# ─── Configuration (from environment, matching agent_memory/config.py) ───
 DB_PATH = os.environ.get("AGENT_MEMORY_DB", os.path.expanduser("~/.asuman/memory.sqlite"))
-EMBED_URL = "http://localhost:8090/v1/embeddings"
-NEW_DIM = 1024
-BATCH_SIZE = 20  # texts per API call
+EMBED_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "http://localhost:8090/v1").rstrip("/")
+EMBED_URL = f"{EMBED_BASE_URL}/embeddings"
+EMBED_MODEL = os.environ.get("AGENT_MEMORY_MODEL", "qwen/qwen3-embedding-4b")
+EMBED_DIM = int(os.environ.get("AGENT_MEMORY_DIMENSIONS", "2560"))
+MAX_CHARS = int(os.environ.get("AGENT_MEMORY_MAX_EMBED_CHARS", "3500"))
+API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+BATCH_SIZE = 2  # conservative for local llama-server
+SLEEP_BETWEEN = 0.5  # seconds between batches
 
 
 def embed_batch(texts: list[str]) -> list[list[float]]:
-    """Call llama-server to embed a batch of texts."""
+    """Call embedding endpoint for a batch of texts."""
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
+
     resp = requests.post(
         EMBED_URL,
-        json={"input": texts, "model": "qwen3"},
-        timeout=60,
+        json={"input": texts, "model": EMBED_MODEL},
+        headers=headers,
+        timeout=180,
     )
     resp.raise_for_status()
     data = resp.json()
     embeddings = sorted(data["data"], key=lambda d: d["index"])
-    return [item["embedding"] for item in embeddings]
+    return [item["embedding"][:EMBED_DIM] for item in embeddings]
 
 
 def float_list_to_blob(vec: list[float]) -> bytes:
@@ -43,6 +67,25 @@ def float_list_to_blob(vec: list[float]) -> bytes:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Re-embed all memories with current config")
+    parser.add_argument("--dry-run", action="store_true", help="Show plan without executing")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Texts per API call")
+    parser.add_argument("--sleep", type=float, default=SLEEP_BETWEEN, help="Seconds between batches")
+    args = parser.parse_args()
+
+    print("Configuration:")
+    print(f"  DB:         {DB_PATH}")
+    print(f"  Embed URL:  {EMBED_URL}")
+    print(f"  Model:      {EMBED_MODEL}")
+    print(f"  Dimensions: {EMBED_DIM}")
+    print(f"  Max chars:  {MAX_CHARS}")
+    print(f"  Batch size: {args.batch_size}")
+    print()
+
+    if not os.path.exists(DB_PATH):
+        print(f"ERROR: Database not found: {DB_PATH}")
+        sys.exit(1)
+
     conn = sqlite3.connect(DB_PATH)
     conn.enable_load_extension(True)
     import sqlite_vec
@@ -50,53 +93,71 @@ def main():
     conn.enable_load_extension(False)
     conn.execute("PRAGMA journal_mode=WAL")
 
-    # 1. Read all memories with their vector rowids
-    print("Reading memories...")
+    # 1. Count memories
     rows = conn.execute("""
         SELECT m.id, m.text, m.vector_rowid
         FROM memories m
-        WHERE m.text IS NOT NULL AND m.text != ''
+        WHERE m.text IS NOT NULL AND m.text != '' AND m.deleted_at IS NULL
         ORDER BY m.id
     """).fetchall()
-    print(f"Found {len(rows)} memories to re-embed")
+    print(f"Found {len(rows)} active memories to re-embed")
 
     if not rows:
         print("No memories found. Exiting.")
         return
 
-    # 2. Drop old vector table and recreate with new dimensions
-    print(f"Recreating memory_vectors table with float[{NEW_DIM}]...")
+    if args.dry_run:
+        print(f"\nDry run: would drop memory_vectors, recreate with float[{EMBED_DIM}], re-embed {len(rows)} memories")
+        conn.close()
+        return
+
+    # 2. Test embedding endpoint
+    print("Testing embedding endpoint...")
+    try:
+        test_vec = embed_batch(["test"])
+        actual_dim = len(test_vec[0])
+        print(f"  Endpoint OK, returns {actual_dim} dimensions")
+        if actual_dim < EMBED_DIM:
+            print(f"  WARNING: model returns {actual_dim} dims but config expects {EMBED_DIM}")
+            print("  Vectors will be truncated/padded. Consider updating AGENT_MEMORY_DIMENSIONS.")
+    except Exception as e:
+        print(f"ERROR: Cannot reach embedding endpoint: {e}")
+        sys.exit(1)
+
+    # 3. Drop old vector table and recreate
+    print(f"Recreating memory_vectors with float[{EMBED_DIM}]...")
     conn.execute("DROP TABLE IF EXISTS memory_vectors")
     conn.execute(f"""
         CREATE VIRTUAL TABLE memory_vectors USING vec0(
-            embedding float[{NEW_DIM}]
+            embedding float[{EMBED_DIM}]
         )
     """)
     conn.commit()
 
-    # 3. Re-embed in batches
+    # 4. Re-embed in batches
     total = len(rows)
     done = 0
+    errors = 0
     start_time = time.time()
 
-    for i in range(0, total, BATCH_SIZE):
-        batch = rows[i:i + BATCH_SIZE]
-        texts = [row[1][:2000] for row in batch]  # truncate long texts
+    for i in range(0, total, args.batch_size):
+        batch = rows[i:i + args.batch_size]
+        texts = [row[1][:MAX_CHARS] for row in batch]
 
         try:
             vectors = embed_batch(texts)
         except Exception as e:
-            print(f"ERROR embedding batch {i}-{i+len(batch)}: {e}")
+            print(f"  ERROR batch {i}-{i+len(batch)}: {e}")
+            errors += len(batch)
             continue
 
-        for (mem_id, content, old_rowid), vec in zip(batch, vectors):
+        for (mem_id, _content, _old_rowid), vec in zip(batch, vectors):
             blob = float_list_to_blob(vec)
             cursor = conn.execute(
                 "INSERT INTO memory_vectors(embedding) VALUES (?)",
                 (blob,),
             )
             new_rowid = cursor.lastrowid
-            # Update the memory to point to new vector rowid
             conn.execute(
                 "UPDATE memories SET vector_rowid = ? WHERE id = ?",
                 (new_rowid, mem_id),
@@ -109,21 +170,22 @@ def main():
         eta = (total - done) / rate if rate > 0 else 0
         print(f"  [{done}/{total}] {rate:.1f} mem/s, ETA: {eta:.0f}s")
 
+        if i + args.batch_size < total:
+            time.sleep(args.sleep)
+
     elapsed = time.time() - start_time
-    print(f"\nDone! Re-embedded {done}/{total} memories in {elapsed:.1f}s")
-    print(f"Average: {elapsed/done*1000:.1f}ms per memory")
+    print(f"\nDone! Re-embedded {done}/{total} memories in {elapsed:.1f}s ({errors} errors)")
+    if done > 0:
+        print(f"Average: {elapsed/done*1000:.1f}ms per memory")
 
-    # 4. Verify
-    count = conn.execute("SELECT COUNT(*) FROM memory_vectors").fetchone()[0]
-    print(f"Vectors in table: {count}")
-
-    # Check dimensions
-    sample = conn.execute(
-        "SELECT embedding FROM memory_vectors LIMIT 1"
-    ).fetchone()
-    if sample:
-        dim = len(struct.unpack(f"{NEW_DIM}f", sample[0]))
-        print(f"Vector dimensions: {dim}")
+    # 5. Verify
+    vec_count = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE vector_rowid IS NOT NULL AND deleted_at IS NULL"
+    ).fetchone()[0]
+    vectorless = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE vector_rowid IS NULL AND deleted_at IS NULL"
+    ).fetchone()[0]
+    print(f"Vectors: {vec_count}, Vectorless: {vectorless}")
 
     conn.close()
     print("Reindex complete!")

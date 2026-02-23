@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-MEMORY_DIR="${HOME}/.asuman"
+MEMORY_DIR="${AGENT_MEMORY_DATA_DIR:-${HOME}/.asuman}"
 BACKUP_DIR="${MEMORY_DIR}/backups"
 CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 DATE=$(date +%Y-%m-%d)

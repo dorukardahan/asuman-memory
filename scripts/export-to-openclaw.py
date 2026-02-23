@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.environ.get("AGENT_MEMORY_DB", os.path.expanduser("~/.asuman/memory.sqlite"))
-OUTPUT_DIR = Path("/root/.openclaw/workspace/memory")
+OUTPUT_DIR = Path(os.environ.get("OPENCLAW_WORKSPACE", os.path.expanduser("~/.openclaw/workspace"))) / "memory"
 OUTPUT_FILE = OUTPUT_DIR / "whatsapp-highlights.md"
 
 
