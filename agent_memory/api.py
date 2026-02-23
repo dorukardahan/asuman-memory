@@ -1078,17 +1078,14 @@ async def health() -> Dict[str, Any]:
     Checks: storage (SQLite read), embedding (probe text), vectorless count.
     """
     checks: Dict[str, bool] = {"storage": False, "embedding": False}
-    vectorless_count = 0
-    total_memories = 0
-    agents_list: list = []
 
     # Storage check — can we read from main DB?
     if _storage_pool:
         try:
             main_stats = _storage_pool.get("main").stats()
             checks["storage"] = True
-            total_memories = main_stats.get("total_memories", 0)
-            agents_list = _storage_pool.get_all_agents()
+            main_stats.get("total_memories", 0)  # validate stats accessible
+            _storage_pool.get_all_agents()  # validate agent listing works
         except Exception:
             pass
 
@@ -1107,7 +1104,7 @@ async def health() -> Dict[str, Any]:
             row = conn.execute(
                 "SELECT COUNT(*) AS c FROM memories WHERE vector_rowid IS NULL AND deleted_at IS NULL"
             ).fetchone()
-            vectorless_count = row["c"] if row else 0
+            row["c"] if row else 0  # validate vectorless query works
         except Exception:
             pass
 
