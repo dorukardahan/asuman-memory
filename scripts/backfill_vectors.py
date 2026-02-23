@@ -97,7 +97,9 @@ async def backfill_agent(
     agent_id: str,
     storage,
     embedder: OpenRouterEmbeddings,
-    batch_size: int = 4,
+    batch_size: int = 2,
+    max_sub_batch: int = 2,
+    sleep_between_batches: float = 1.0,
     dry_run: bool = False,
 ) -> Dict[str, int]:
     """Backfill vectors for a single agent."""
@@ -135,7 +137,7 @@ async def backfill_agent(
         texts = [mem["text"] for mem in memories]
 
         try:
-            vectors = await embedder.embed_batch_resilient(texts, max_sub_batch=batch_size)
+            vectors = await embedder.embed_batch_resilient(texts, max_sub_batch=max_sub_batch)
         except Exception as exc:
             logger.error("Embedding batch failed for %s: %s", agent_id, exc)
             # Fall back to individual
@@ -174,6 +176,9 @@ async def backfill_agent(
             (processed_total / total_vectorless * 100) if total_vectorless else 0
         )
 
+        if sleep_between_batches > 0:
+            await asyncio.sleep(sleep_between_batches)
+
         # Safety: if we got fewer than batch_size, we're done
         if len(memories) < batch_size:
             break
@@ -193,8 +198,20 @@ async def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
-        help="Number of memories to process per batch (default: 4)",
+        default=2,
+        help="Number of memories to process per batch (default: 2)",
+    )
+    parser.add_argument(
+        "--max-sub-batch",
+        type=int,
+        default=2,
+        help="Max texts per embedding API call (default: 2)",
+    )
+    parser.add_argument(
+        "--sleep-between-batches",
+        type=float,
+        default=1.0,
+        help="Sleep seconds between batches (default: 1.0)",
     )
     parser.add_argument(
         "--dry-run",
@@ -269,6 +286,8 @@ async def main():
                 storage=storage,
                 embedder=embedder,
                 batch_size=args.batch_size,
+                max_sub_batch=args.max_sub_batch,
+                sleep_between_batches=args.sleep_between_batches,
                 dry_run=args.dry_run,
             )
             total_stats["processed"] += stats["processed"]
