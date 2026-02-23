@@ -44,6 +44,7 @@ class OpenRouterEmbeddings:
         base_url: Optional[str] = None,
         max_retries: int = 3,
         cache_size: int = 1024,
+        timeout_seconds: int = 180,
     ) -> None:
         cfg = load_config()
         self.api_key: str = api_key or cfg.openrouter_api_key
@@ -51,6 +52,7 @@ class OpenRouterEmbeddings:
         self.dimensions: int = dimensions or cfg.embedding_dimensions
         self.base_url: str = (base_url or cfg.openrouter_base_url).rstrip("/")
         self.max_retries: int = max_retries
+        self.timeout_seconds: int = timeout_seconds
 
         self._url = f"{self.base_url}/embeddings"
         self._headers = {
@@ -107,7 +109,7 @@ class OpenRouterEmbeddings:
                     self._url,
                     headers=self._headers,
                     json=payload,
-                    timeout=120,
+                    timeout=self.timeout_seconds,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
