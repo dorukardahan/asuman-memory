@@ -2,7 +2,7 @@
 
 Persistent, local-first memory for AI agents. One SQLite file, no Docker, no cloud DB.
 
-Your agent remembers conversations, decisions, and facts across sessions with hybrid recall.
+Your OpenClaw agent remembers conversations, decisions, and facts across sessions with hybrid recall.
 
 ## Features
 
@@ -26,24 +26,22 @@ Your agent remembers conversations, decisions, and facts across sessions with hy
 git clone https://github.com/dorukardahan/asuman-memory.git
 cd asuman-memory
 
-# Setup
-python3 -m venv venv
-source venv/bin/activate
+# Setup virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# Configure (create .env)
-cat > .env << EOF
-OPENROUTER_API_KEY=your-key-here
-OPENROUTER_BASE_URL=http://localhost:8090/v1  # or https://openrouter.ai/api/v1
-AGENT_MEMORY_DB=/path/to/memory.sqlite
-AGENT_MEMORY_DIMENSIONS=2560
-AGENT_MEMORY_API_KEY=your-api-key
-AGENT_MEMORY_RERANKER_ENABLED=true
-AGENT_MEMORY_RERANKER_MODEL=balanced
-EOF
+# Configure
+cp .env.example .env
+# Edit .env and set at least: OPENROUTER_API_KEY, AGENT_MEMORY_API_KEY
 
-# Run
+# Load env vars for this shell
+set -a
 source .env
+set +a
+
+# Run API
 python -m agent_memory
 ```
 
@@ -51,9 +49,10 @@ The API starts on `http://127.0.0.1:8787`.
 
 ## Embedding Server
 
-Agent Memory needs an embedding API compatible with the OpenAI `/v1/embeddings` format. Options:
+Agent Memory needs an embedding API compatible with the OpenAI `/v1/embeddings` format.
 
 **Local (recommended for privacy):**
+
 ```bash
 # llama.cpp with Qwen3-Embedding
 llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
@@ -61,8 +60,9 @@ llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
   --ctx-size 8192 --batch-size 2048 --threads 12 --parallel 2
 ```
 
-**Cloud:**
-Set `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1` and use any embedding model.
+Set `OPENROUTER_BASE_URL=http://127.0.0.1:8090/v1` in `.env` for local mode.
+
+**Cloud:** set `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`.
 
 > **Important:** With `--parallel N`, each slot gets `ctx-size / N` tokens. Set `ctx-size` high enough for your longest texts, or use `AGENT_MEMORY_MAX_EMBED_CHARS` to truncate.
 
@@ -90,7 +90,7 @@ All endpoints accept `?agent=<id>` for per-agent routing. Use `agent=all` for cr
 
 ## Search Architecture
 
-```
+```text
 Query → [Semantic (0.50)] → sqlite-vec cosine
       → [Keyword  (0.25)] → FTS5 BM25 trigram
       → [Recency  (0.10)] → exp(-0.01 × days)
@@ -106,47 +106,99 @@ Query → [Semantic (0.50)] → sqlite-vec cosine
 
 ## Configuration
 
-All config via environment variables (`AGENT_MEMORY_*` prefix):
+All configuration is environment-driven. `AGENT_MEMORY_*` variables are canonical.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENROUTER_API_KEY` | — | Embedding API key |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Embedding API URL |
-| `AGENT_MEMORY_DB` | `~/.agent-memory/memory.sqlite` | Database path |
+| `AGENT_MEMORY_CONFIG` | _unset_ | Optional JSON config file path loaded before env vars |
+| `OPENROUTER_API_KEY` | `""` | Embedding API key (required for semantic embeddings) |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Embedding API base URL |
+| `AGENT_MEMORY_MODEL` | `qwen/qwen3-embedding-8b` | Embedding model name |
 | `AGENT_MEMORY_DIMENSIONS` | `4096` | Embedding dimensions |
-| `AGENT_MEMORY_PORT` | `8787` | API port |
-| `AGENT_MEMORY_HOST` | `127.0.0.1` | API bind address |
-| `AGENT_MEMORY_API_KEY` | — | API authentication key |
 | `AGENT_MEMORY_MAX_EMBED_CHARS` | `3500` | Truncate text before embedding |
-| `AGENT_MEMORY_RERANKER_ENABLED` | `true` | Enable cross-encoder reranking |
-| `AGENT_MEMORY_RERANKER_MODEL` | `balanced` | Reranker preset: `fast`/`balanced`/`quality` |
-| `AGENT_MEMORY_RERANKER_TWO_PASS_ENABLED` | `true` | Enable background quality reranker |
+| `AGENT_MEMORY_DB` | `$HOME/.agent-memory/memory.sqlite`* | SQLite path |
+| `AGENT_MEMORY_HOST` | `127.0.0.1` | API bind address |
+| `AGENT_MEMORY_PORT` | `8787` | API port |
+| `AGENT_MEMORY_API_KEY` | `""` | API authentication key |
+| `AGENT_MEMORY_SESSIONS_DIR` | `$HOME/.openclaw/agents/main/sessions` | Session source directory |
+| `AGENT_MEMORY_W_SEMANTIC` | `0.50` | Semantic score weight |
+| `AGENT_MEMORY_W_KEYWORD` | `0.25` | Keyword/BM25 score weight |
+| `AGENT_MEMORY_W_RECENCY` | `0.10` | Recency score weight |
+| `AGENT_MEMORY_W_STRENGTH` | `0.07` | Memory-strength score weight |
+| `AGENT_MEMORY_W_IMPORTANCE` | `0.08` | Importance score weight |
+| `AGENT_MEMORY_RERANKER_ENABLED` | `true` | Enable primary cross-encoder reranker |
+| `AGENT_MEMORY_RERANKER_MODEL` | `balanced` | Reranker preset (`fast`, `balanced`, `quality`) or HF model id |
+| `AGENT_MEMORY_RERANKER_TOP_K` | `10` | Docs reranked in primary pass |
+| `AGENT_MEMORY_RERANKER_WEIGHT` | `0.22` | Primary reranker blend weight |
+| `AGENT_MEMORY_RERANKER_THREADS` | `4` | Torch threads for primary reranker |
+| `AGENT_MEMORY_RERANKER_MAX_DOC_CHARS` | `600` | Per-doc char limit in primary reranker |
+| `AGENT_MEMORY_RERANKER_PREWARM` | `true` | Prewarm primary reranker at startup |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_ENABLED` | `true` | Enable background second pass |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_MODEL` | `quality` | Background reranker preset/model |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_TOP_K` | `3` | Docs reranked in second pass |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_WEIGHT` | `0.35` | Two-pass reranker blend weight |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_THREADS` | `2` | Torch threads for second pass |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_MAX_DOC_CHARS` | `450` | Per-doc char limit in second pass |
+| `AGENT_MEMORY_RERANKER_TWO_PASS_PREWARM` | `false` | Prewarm background reranker at startup |
 
-Legacy `ASUMAN_MEMORY_*` prefixes are also accepted.
+\* `AGENT_MEMORY_DB` fallback behavior in code: if `$HOME/.asuman` exists and `$HOME/.agent-memory` does not, default becomes `$HOME/.asuman/memory.sqlite`.
+
+Legacy fallbacks are still accepted when the new key is unset: `ASUMAN_MEMORY_CONFIG`, `ASUMAN_MEMORY_DB`, `ASUMAN_MEMORY_MODEL`, `ASUMAN_MEMORY_PORT`, `ASUMAN_MEMORY_DIMENSIONS`, `ASUMAN_MEMORY_HOST`, `ASUMAN_SESSIONS_DIR`.
 
 ## Cron Jobs
 
 ```bash
 # Incremental session sync (every 30 min)
-*/30 * * * * cd /path/to/agent-memory && . .env && venv/bin/python scripts/openclaw_sync.py
+*/30 * * * * cd /path/to/asuman-memory && set -a && . ./.env && set +a && ./.venv/bin/python scripts/openclaw_sync.py
 
 # Ebbinghaus decay (daily 2am)
-0 2 * * * curl -s -X POST -H "X-API-Key: $KEY" http://localhost:8787/v1/decay -d '{"agent":"all"}'
+0 2 * * * curl -s -X POST -H "X-API-Key: $KEY" http://127.0.0.1:8787/v1/decay -d '{"agent":"all"}'
 
 # Consolidation (weekly Sunday 3am)
-0 3 * * 0 curl -s -X POST -H "X-API-Key: $KEY" http://localhost:8787/v1/consolidate -d '{"agent":"all"}'
+0 3 * * 0 curl -s -X POST -H "X-API-Key: $KEY" http://127.0.0.1:8787/v1/consolidate -d '{"agent":"all"}'
 
 # GC purge (weekly Sunday 4am)
-0 4 * * 0 curl -s -X POST -H "X-API-Key: $KEY" http://localhost:8787/v1/gc -d '{"agent":"all"}'
+0 4 * * 0 curl -s -X POST -H "X-API-Key: $KEY" http://127.0.0.1:8787/v1/gc -d '{"agent":"all"}'
 
 # Vectorless backfill (every 6 hours)
-0 */6 * * * cd /path/to/agent-memory && . .env && venv/bin/python scripts/backfill_vectors.py --agent all
+0 */6 * * * cd /path/to/asuman-memory && set -a && . ./.env && set +a && ./.venv/bin/python scripts/backfill_vectors.py --agent all
 ```
+
+## Deployment
+
+### 1) systemd service
+
+Use `asuman-memory.service.example` as the base unit file, then install and enable it:
+
+```bash
+sudo cp asuman-memory.service.example /etc/systemd/system/asuman-memory.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now asuman-memory
+sudo systemctl status asuman-memory --no-pager
+```
+
+Keep secrets in an env file (for example `/etc/asuman-memory.env`) and reference it from the service `EnvironmentFile=` entry.
+
+### 2) Embedding server in production
+
+- Run a local embedding server (`llama-server`) with enough context for your longest chunks.
+- Set `OPENROUTER_BASE_URL` to that server (`http://127.0.0.1:8090/v1`) or to OpenRouter.
+- Keep `AGENT_MEMORY_DIMENSIONS` aligned with the selected embedding model output.
+- If you increase `--parallel`, also increase `--ctx-size` or reduce `AGENT_MEMORY_MAX_EMBED_CHARS`.
+
+### 3) Production checklist
+
+- Set strong secrets: `OPENROUTER_API_KEY`, `AGENT_MEMORY_API_KEY`.
+- Pin an explicit DB path with enough disk (`AGENT_MEMORY_DB`).
+- Keep `AGENT_MEMORY_HOST=127.0.0.1` unless reverse-proxying intentionally.
+- Back up the SQLite DB regularly (`/v1/export` or filesystem snapshots).
+- Monitor health and logs: `/v1/health`, `/v1/metrics`, `journalctl -u asuman-memory`.
+- Schedule cron jobs (sync, decay, consolidate, gc, backfill).
 
 ## Tests
 
 ```bash
-venv/bin/python -m pytest tests/ -x -q
+.venv/bin/python -m pytest tests/ -x -q
 ```
 
 ## License
