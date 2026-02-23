@@ -1213,10 +1213,25 @@ async def import_memories(req: ImportRequest) -> Dict[str, Any]:
         # Embed if embedder available
         vector = None
         if _embedder is not None:
-            try:
-                vector = await _embedder.embed(text)
-            except Exception:
-                pass
+            for attempt in range(3):
+                try:
+                    vector = await _embedder.embed(text)
+                    break
+                except Exception as exc:
+                    if attempt < 2:
+                        logger.warning(
+                            "Import embed retry %d/3 for memory %s: %s",
+                            attempt + 1,
+                            mid or "new",
+                            exc,
+                        )
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                    else:
+                        logger.error(
+                            "Import embed failed after 3 attempts for memory %s: %s",
+                            mid or "new",
+                            exc,
+                        )
 
         storage.store_memory(
             text=text,
