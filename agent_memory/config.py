@@ -75,6 +75,10 @@ class Config:
     embed_cache_size: int = 1024
     max_embed_chars: int = 3500  # Truncate text before embedding (safe for ~1024 token slots)
 
+    # Background embedding worker
+    embed_worker_enabled: bool = True
+    embed_worker_interval: int = 300
+
     def validate(self) -> list[str]:
         """Return a list of validation errors (empty == OK)."""
         errors: list[str] = []
@@ -100,6 +104,8 @@ class Config:
             errors.append("AGENT_MEMORY_RERANKER_TWO_PASS_THREADS must be >= 1")
         if self.reranker_two_pass_max_doc_chars < 200:
             errors.append("AGENT_MEMORY_RERANKER_TWO_PASS_MAX_DOC_CHARS must be >= 200")
+        if self.embed_worker_interval < 1:
+            errors.append("AGENT_MEMORY_EMBED_WORKER_INTERVAL must be >= 1")
         return errors
 
 
@@ -138,6 +144,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         AGENT_MEMORY_RERANKER_TWO_PASS_THREADS
         AGENT_MEMORY_RERANKER_TWO_PASS_MAX_DOC_CHARS
         AGENT_MEMORY_RERANKER_TWO_PASS_PREWARM
+        AGENT_MEMORY_EMBED_WORKER_ENABLED
+        AGENT_MEMORY_EMBED_WORKER_INTERVAL
     """
     cfg = Config()
 
@@ -186,6 +194,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         "AGENT_MEMORY_RERANKER_TWO_PASS_MAX_DOC_CHARS": ("reranker_two_pass_max_doc_chars", int),
         "AGENT_MEMORY_RERANKER_TWO_PASS_PREWARM": ("reranker_two_pass_prewarm", _parse_bool),
         "AGENT_MEMORY_MAX_EMBED_CHARS": ("max_embed_chars", int),
+        "AGENT_MEMORY_EMBED_WORKER_ENABLED": ("embed_worker_enabled", _parse_bool),
+        "AGENT_MEMORY_EMBED_WORKER_INTERVAL": ("embed_worker_interval", int),
     }
 
     # Legacy env var fallbacks (checked only if new name is not set)
