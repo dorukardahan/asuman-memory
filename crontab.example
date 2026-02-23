@@ -22,6 +22,10 @@ REPO=/opt/asuman/whatsapp-memory
 # Permanently deletes soft-deleted memories older than 30 days
 0 3 * * 0 $REPO/scripts/cron_api_call.sh /v1/gc '{"agent":"all","soft_deleted_days":30}' >> /var/log/asuman-memory-gc.log 2>&1
 
+# ─── Consolidation (weekly Sunday 2:30am) ───────────────────────────────
+# Deduplicate similar memories and archive weak ones
+30 2 * * 0 $REPO/scripts/cron_api_call.sh /v1/consolidate '{"agent":"all"}' >> /var/log/asuman-memory-consolidate.log 2>&1
+
 # ─── Export to Workspace (weekly Sunday 4am) ────────────────────────────
 # Exports memory summaries to OpenClaw workspace dirs for agent context
 0 4 * * 0 $REPO/.venv/bin/python $REPO/scripts/export-to-workspace.py >> /tmp/memory-export.log 2>&1
