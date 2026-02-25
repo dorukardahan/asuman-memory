@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
+import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -304,9 +305,13 @@ app.add_middleware(RateLimitMiddleware, max_requests=120, window_seconds=60)
 
 # API key authentication
 _api_key = os.environ.get("AGENT_MEMORY_API_KEY", "")
+_extra_keys_path = os.path.join(
+    os.environ.get("AGENT_MEMORY_DATA_DIR", os.path.expanduser("~/.asuman")),
+    "memory-api-keys.json",
+)
 if _api_key:
-    app.add_middleware(APIKeyMiddleware, api_key=_api_key)
-    logger.info("API key authentication enabled")
+    app.add_middleware(APIKeyMiddleware, api_key=_api_key, extra_keys_path=_extra_keys_path)
+    logger.info("API key authentication enabled (extra keys: %s)", _extra_keys_path)
 else:
     logger.warning("No AGENT_MEMORY_API_KEY set -- API is UNAUTHENTICATED")
 
@@ -1404,6 +1409,59 @@ async def import_memories(req: ImportRequest) -> Dict[str, Any]:
         imported, skipped, req.agent or "main",
     )
     return {"imported": imported, "skipped": skipped, "total": len(req.memories)}
+
+
+# ---------------------------------------------------------------------------
+# Admin: Key Rotation
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/admin/rotate-key")
+async def rotate_key(expire_old_hours: int = 24) -> Dict[str, Any]:
+    """Generate a new API key and optionally expire the current extra keys.
+
+    - Generates a new 32-byte URL-safe key
+    - Appends to memory-api-keys.json
+    - Optionally sets expires_at on existing extra keys
+    - Returns the new key (only time it's visible!)
+    """
+    import json as _json
+
+    new_key = secrets.token_urlsafe(32)
+    keys_path = _extra_keys_path
+
+    existing_keys: list = []
+    try:
+        with open(keys_path) as f:
+            data = _json.load(f)
+            existing_keys = data.get("keys", [])
+    except (FileNotFoundError, _json.JSONDecodeError):
+        pass
+
+    # Expire old extra keys if requested
+    if expire_old_hours > 0:
+        expire_at = time.time() + (expire_old_hours * 3600)
+        for entry in existing_keys:
+            if entry.get("expires_at") is None:
+                entry["expires_at"] = expire_at
+
+    # Add new key
+    existing_keys.append({
+        "key": new_key,
+        "label": f"rotated-{int(time.time())}",
+        "created_at": time.time(),
+        "expires_at": None,
+    })
+
+    os.makedirs(os.path.dirname(keys_path), exist_ok=True)
+    with open(keys_path, "w") as f:
+        _json.dump({"keys": existing_keys}, f, indent=2)
+
+    logger.info("API key rotated. Total keys: %d", len(existing_keys))
+    return {
+        "new_key": new_key,
+        "total_keys": len(existing_keys),
+        "old_keys_expire_in_hours": expire_old_hours if expire_old_hours > 0 else None,
+    }
 
 
 # ---------------------------------------------------------------------------
