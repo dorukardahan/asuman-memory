@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS memories (
     strength REAL DEFAULT 1.0,
     last_accessed_at REAL,
     -- Soft-delete / archive support
-    deleted_at REAL
+    deleted_at REAL,
+    -- Critical memory pinning: pinned memories survive decay/gc/consolidation
+    pinned INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
@@ -229,6 +231,8 @@ class MemoryStorage:
         _add_col("memories", "last_accessed_at REAL", "last_accessed_at")
         # Consolidation: soft-delete
         _add_col("memories", "deleted_at REAL", "deleted_at")
+        # Critical memory pinning: pinned memories survive decay/gc/consolidation
+        _add_col("memories", "pinned INTEGER DEFAULT 0", "pinned")
 
         # Backfill last_accessed_at for existing rows (keep idempotent)
         try:
@@ -392,6 +396,34 @@ class MemoryStorage:
     # Ebbinghaus strength / spaced repetition
     # ------------------------------------------------------------------
 
+    def pin_memory(self, memory_id: str) -> bool:
+        """Pin a memory: protects it from decay, gc, and consolidation."""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE memories SET pinned = 1 WHERE id = ? AND deleted_at IS NULL",
+                (memory_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as exc:
+            logger.debug("pin_memory failed for %s: %s", memory_id, exc)
+            return False
+
+    def unpin_memory(self, memory_id: str) -> bool:
+        """Unpin a memory: allows decay/gc/consolidation again."""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE memories SET pinned = 0 WHERE id = ? AND deleted_at IS NULL",
+                (memory_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as exc:
+            logger.debug("unpin_memory failed for %s: %s", memory_id, exc)
+            return False
+
     def boost_strength(self, memory_id: str) -> bool:
         """Boost strength on retrieval (spaced repetition).
 
@@ -459,6 +491,7 @@ class MemoryStorage:
                        )
                    END
                  WHERE deleted_at IS NULL
+                   AND COALESCE(pinned, 0) = 0
                    AND (
                        (COALESCE(last_accessed_at, created_at) < ? - 604800) -- stale
                        OR
@@ -482,6 +515,7 @@ class MemoryStorage:
                 UPDATE memories
                    SET deleted_at = CAST(strftime('%s', 'now') AS INTEGER)
                  WHERE deleted_at IS NULL
+                   AND COALESCE(pinned, 0) = 0
                    AND strength <= ?
                    AND importance <= 0.3
                    AND COALESCE(last_accessed_at, created_at) < ? - 1209600

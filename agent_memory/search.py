@@ -86,7 +86,7 @@ class SearchWeights:
     keyword: float = 0.25
     recency: float = 0.10
     strength: float = 0.07
-    importance: float = 0.25
+    importance: float = 0.08
 
 
 @dataclass
@@ -141,6 +141,41 @@ def _strength_score(last_accessed_at: float, strength: float) -> float:
 
     days = max(0.0, (time.time() - float(last_accessed_at)) / 86400.0)
     return math.exp(-days / s)
+
+
+def _mmr_diversify(
+    results: List["SearchResult"],
+    limit: int,
+    lambda_param: float = 0.7,
+) -> List["SearchResult"]:
+    """Maximal Marginal Relevance: greedily select results balancing
+    relevance (score) and diversity (low text overlap with already selected).
+
+    lambda_param: 1.0 = pure relevance, 0.0 = pure diversity.
+    """
+    if len(results) <= 1:
+        return results
+
+    selected: List["SearchResult"] = [results[0]]
+    remaining = list(results[1:])
+
+    while remaining and len(selected) < limit:
+        best_idx = 0
+        best_mmr = -1.0
+        for i, cand in enumerate(remaining):
+            relevance = cand.score
+            # Max similarity to any already-selected result (text overlap)
+            max_sim = max(
+                _lexical_overlap(cand.text, sel.text)
+                for sel in selected
+            )
+            mmr = lambda_param * relevance - (1.0 - lambda_param) * max_sim
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+        selected.append(remaining.pop(best_idx))
+
+    return selected
 
 
 def _rrf_fuse(
@@ -484,9 +519,17 @@ class HybridSearch:
         if len(results) > 1:
             try:
                 query_token_count = len(_tokenize_for_rerank(q_norm))
-                # VPS-tuned friend-repo behavior:
-                # rerank almost always (except extremely short/noisy queries).
-                need_rerank = query_token_count >= 2
+
+                # Adaptive reranker gating: skip when top results are clearly
+                # separated (score spread > threshold).  This saves ~500ms+ on
+                # unambiguous queries while preserving quality for close calls.
+                _scores = [r.score for r in results[:5]]
+                _spread = (_scores[0] - _scores[-1]) if len(_scores) >= 2 else 0.0
+                _RERANK_SPREAD_THRESHOLD = 0.005  # tune: higher = rerank less often
+                need_rerank = (
+                    query_token_count >= 2
+                    and _spread < _RERANK_SPREAD_THRESHOLD
+                )
 
                 if need_rerank:
                     base_ranked = [r.id for r in results]
@@ -556,6 +599,11 @@ class HybridSearch:
                 agent=agent,
                 seed_results=results,
             )
+
+        # MMR diversity pass: remove near-duplicate results.
+        # Uses text overlap as proxy for similarity (avoids extra embedding calls).
+        if len(results) > 2:
+            results = _mmr_diversify(results, limit, lambda_param=0.7)
 
         # Return only requested count after optional reranking over pre-limit pool.
         if len(results) > limit:

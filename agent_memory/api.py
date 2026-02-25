@@ -662,6 +662,26 @@ async def store_rule(req: StoreRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/v1/pin")
+async def pin_memory(req: ForgetRequest) -> Dict[str, Any]:
+    """Pin a memory: protects it from decay, gc, and consolidation."""
+    if not req.id:
+        raise HTTPException(400, "Provide 'id'")
+    storage = _get_storage(req.agent)
+    pinned = storage.pin_memory(req.id)
+    return {"pinned": pinned, "id": req.id}
+
+
+@app.post("/v1/unpin")
+async def unpin_memory(req: ForgetRequest) -> Dict[str, Any]:
+    """Unpin a memory: allows decay/gc/consolidation again."""
+    if not req.id:
+        raise HTTPException(400, "Provide 'id'")
+    storage = _get_storage(req.agent)
+    unpinned = storage.unpin_memory(req.id)
+    return {"unpinned": unpinned, "id": req.id}
+
+
 @app.delete("/v1/forget")
 async def forget(req: ForgetRequest) -> Dict[str, Any]:
     """Delete a memory by ID or by searching for it."""
