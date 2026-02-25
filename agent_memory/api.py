@@ -353,6 +353,8 @@ class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
     limit: int = Field(default=5, ge=1, le=50)
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_tokens: Optional[int] = Field(default=None, ge=100, le=100000,
+                                       description="Trim results to fit within this token budget")
     agent: Optional[str] = None
 
 
@@ -416,13 +418,26 @@ async def recall(req: RecallRequest) -> Dict[str, Any]:
     )
 
     agent_key = StoragePool.normalize_key(req.agent)
+    result_dicts = [r.to_dict() for r in results]
+
+    # Apply token budget trimming if requested
+    trimmed = False
+    if req.max_tokens is not None and result_dicts:
+        from .token_utils import trim_results_to_budget
+        original_count = len(result_dicts)
+        result_dicts = trim_results_to_budget(result_dicts, req.max_tokens)
+        trimmed = len(result_dicts) < original_count
+
     response = {
         "query": req.query,
         "agent": agent_key,
-        "count": len(results),
+        "count": len(result_dicts),
         "triggered": should_trigger(req.query),
-        "results": [r.to_dict() for r in results],
+        "results": result_dicts,
     }
+    if trimmed:
+        response["trimmed"] = True
+        response["max_tokens"] = req.max_tokens
     if time_range is not None:
         response["time_range"] = {
             "start": time_range[0],
