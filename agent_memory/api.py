@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -95,23 +95,63 @@ logging.getLogger("audit").setLevel(logging.INFO)
 # Agent routing helpers
 # ---------------------------------------------------------------------------
 
-def _get_storage(agent: Optional[str] = None) -> MemoryStorage:
+def _check_allowed_agent(request: Optional[Request], agent: Optional[str]) -> None:
+    """Enforce per-key agent scope restrictions.
+
+    - allowed_agent=None means admin key (all agents)
+    - allowed_agent='<agent>' means this key can only access that agent
+    """
+    if request is None:
+        return
+
+    allowed_agent = getattr(request.state, "allowed_agent", None)
+    if allowed_agent is None:
+        return  # admin key
+
+    try:
+        allowed_key = StoragePool.normalize_key(allowed_agent)
+    except ValueError:
+        raise HTTPException(403, "API key has invalid agent scope")
+
+    if agent == "all":
+        raise HTTPException(403, f"API key is restricted to agent '{allowed_key}'")
+
+    try:
+        requested_key = StoragePool.normalize_key(agent)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    if requested_key != allowed_key:
+        raise HTTPException(403, f"API key is restricted to agent '{allowed_key}'")
+
+
+def _get_storage(agent: Optional[str] = None, request: Optional[Request] = None) -> MemoryStorage:
     """Get the MemoryStorage for the given agent."""
     if _storage_pool is None:
         raise HTTPException(503, "Storage pool not initialised")
+
+    _check_allowed_agent(request, agent)
+
     try:
         return _storage_pool.get(agent)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
 
-def _get_search(agent: Optional[str] = None) -> HybridSearch:
+def _get_search(agent: Optional[str] = None, request: Optional[Request] = None) -> HybridSearch:
     """Get or create a HybridSearch for the given agent."""
     if _storage_pool is None or _search_weights is None:
         raise HTTPException(503, "Search not initialised")
-    key = StoragePool.normalize_key(agent)
+
+    _check_allowed_agent(request, agent)
+
+    try:
+        key = StoragePool.normalize_key(agent)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
     if key not in _search_cache:
-        storage = _storage_pool.get(agent)
+        storage = _storage_pool.get(key)
         _search_cache[key] = HybridSearch(
             storage=storage,
             embedder=_embedder,
@@ -392,6 +432,13 @@ class ConsolidateRequest(BaseModel):
     agent: Optional[str] = None
 
 
+class CompressRequest(BaseModel):
+    agent: Optional[str] = None
+    age_days: int = Field(default=30, ge=7, description="Compress memories older than this many days")
+    min_chars: int = Field(default=500, ge=100, description="Only compress memories longer than this")
+    dry_run: bool = Field(default=False, description="Preview without actually compressing")
+
+
 class GCRequest(BaseModel):
     agent: Optional[str] = None
     soft_deleted_days: int = Field(default=30, ge=7, description="Purge memories soft-deleted for this many days")
@@ -402,15 +449,15 @@ class GCRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.post("/v1/recall")
-async def recall(req: RecallRequest) -> Dict[str, Any]:
+async def recall(req: RecallRequest, request: Request) -> Dict[str, Any]:
     """Search memories using hybrid search (semantic + BM25 + recency).
 
     Use ``agent="all"`` to search across all agent databases.
     """
     if req.agent == "all":
-        return await _recall_all(req)
+        return await _recall_all(req, request)
 
-    search = _get_search(req.agent)
+    search = _get_search(req.agent, request=request)
 
     # Temporal-aware search: parse time expressions from query
     time_range = None
@@ -458,7 +505,7 @@ async def recall(req: RecallRequest) -> Dict[str, Any]:
     return response
 
 
-async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
+async def _recall_all(req: RecallRequest, request: Request) -> Dict[str, Any]:
     """Cross-agent recall: query all agent DBs, merge by score."""
     if _storage_pool is None:
         raise HTTPException(503, "Storage pool not initialised")
@@ -472,7 +519,7 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
     all_results: List[Dict[str, Any]] = []
     for agent_id in _storage_pool.get_all_agents():
         try:
-            search = _get_search(agent_id)
+            search = _get_search(agent_id, request=request)
             results = await search.search(
                 query=req.query,
                 limit=req.limit,
@@ -483,6 +530,10 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
                 d = r.to_dict()
                 d["agent"] = agent_id
                 all_results.append(d)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                raise
+            logger.warning("Cross-agent recall failed for %s: %s", agent_id, exc)
         except Exception as exc:
             logger.warning("Cross-agent recall failed for %s: %s", agent_id, exc)
 
@@ -507,7 +558,7 @@ async def _recall_all(req: RecallRequest) -> Dict[str, Any]:
 
 
 @app.post("/v1/capture")
-async def capture(req: CaptureRequest) -> Dict[str, Any]:
+async def capture(req: CaptureRequest, request: Request) -> Dict[str, Any]:
     """Ingest a batch of messages into memory.
 
     Each message dict should have at least ``text`` and ``role``.
@@ -515,7 +566,7 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
     if req.agent == "all":
         raise HTTPException(400, "Cannot capture to 'all' -- specify an agent")
 
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
 
     # Pre-filter / normalize
     cleaned: List[Dict[str, Any]] = []
@@ -601,7 +652,7 @@ async def capture(req: CaptureRequest) -> Dict[str, Any]:
 
 
 @app.post("/v1/store")
-async def store(req: StoreRequest) -> Dict[str, Any]:
+async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
     """Manually store a single memory."""
     if req.agent == "all":
         raise HTTPException(400, "Cannot store to 'all' -- specify an agent")
@@ -871,6 +922,47 @@ async def consolidate(req: ConsolidateRequest = ConsolidateRequest()) -> Dict[st
 
     agent_key = StoragePool.normalize_key(req.agent)
     result = _consolidate_single(agent_key)
+    result["agent"] = agent_key
+    return result
+
+
+@app.post("/v1/compress")
+async def compress(req: CompressRequest = CompressRequest()) -> Dict[str, Any]:
+    """Compress old, long memories by replacing text with summary.
+
+    Pinned and high-importance (>=0.8) memories are skipped.
+    Use dry_run=true to preview without changes.
+    """
+    from .compression import compress_old_memories
+
+    if _storage_pool is None:
+        raise HTTPException(503, "Storage pool not initialised")
+
+    if req.agent == "all":
+        total = {"compressed": 0, "skipped": 0, "saved_chars": 0}
+        for agent_id in _storage_pool.get_all_agents():
+            try:
+                storage = _storage_pool.get(agent_id)
+                result = compress_old_memories(
+                    storage, agent=agent_id,
+                    age_days=req.age_days, min_chars=req.min_chars,
+                    dry_run=req.dry_run,
+                )
+                total["compressed"] += result["compressed"]
+                total["skipped"] += result["skipped"]
+                total["saved_chars"] += result["saved_chars"]
+            except Exception as exc:
+                logger.warning("Compression failed for %s: %s", agent_id, exc)
+        total["dry_run"] = req.dry_run
+        return total
+
+    agent_key = StoragePool.normalize_key(req.agent)
+    storage = _get_storage(agent_key)
+    result = compress_old_memories(
+        storage, agent=agent_key,
+        age_days=req.age_days, min_chars=req.min_chars,
+        dry_run=req.dry_run,
+    )
     result["agent"] = agent_key
     return result
 
@@ -1265,6 +1357,17 @@ async def health_deep() -> Dict[str, Any]:
         "uptime_seconds": round(time.time() - _start_time, 1),
         "checks": checks,
     }
+
+
+@app.get("/v1/metrics/prometheus")
+async def metrics_prometheus() -> Any:
+    """Prometheus text exposition format metrics."""
+    from .metrics import render_prometheus_metrics
+    from starlette.responses import PlainTextResponse
+    return PlainTextResponse(
+        render_prometheus_metrics(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/v1/metrics")
