@@ -1359,6 +1359,17 @@ async def health_deep() -> Dict[str, Any]:
     }
 
 
+@app.get("/v1/metrics/prometheus")
+async def metrics_prometheus() -> Any:
+    """Prometheus text exposition format metrics."""
+    from .metrics import render_prometheus_metrics
+    from starlette.responses import PlainTextResponse
+    return PlainTextResponse(
+        render_prometheus_metrics(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 @app.get("/v1/metrics")
 async def metrics(
     agent: Optional[str] = Query(default=None),
