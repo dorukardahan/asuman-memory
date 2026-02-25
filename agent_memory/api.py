@@ -7,7 +7,8 @@ Endpoints:
     DELETE /v1/forget        -- Delete memory
     GET    /v1/search        -- Interactive search
     GET    /v1/stats         -- Statistics
-    GET    /v1/health        -- Health check
+    GET    /v1/health        -- Health check (fast)
+    GET    /v1/health/deep   -- Deep health check (DB/embedding diagnostics)
     GET    /v1/agents        -- List known agent memory databases
     POST   /v1/decay         -- Run Ebbinghaus strength decay
     POST   /v1/consolidate   -- Deduplicate + archive stale memories
@@ -1158,6 +1159,94 @@ async def health() -> Dict[str, Any]:
         "uptime_seconds": round(time.time() - _start_time, 1),
     }
 
+
+@app.get("/v1/health/deep")
+async def health_deep() -> Dict[str, Any]:
+    """Deep health check with diagnostics for operators.
+
+    Includes SQLite quick integrity probe, embedding probe latency,
+    vectorless memory count, DB file size and service uptime.
+    """
+    checks: Dict[str, Dict[str, Any]] = {
+        "db_integrity": {"ok": False, "result": None, "latency_ms": None},
+        "embedding": {"ok": False, "latency_ms": None},
+        "vectorless": {"ok": False, "count": None},
+        "disk_usage": {"ok": False, "db_path": None, "db_size_bytes": None},
+    }
+
+    storage_available = False
+
+    if _storage_pool:
+        try:
+            storage = _storage_pool.get("main")
+            conn = storage._get_conn()
+            storage_available = True
+
+            quick_check_start = time.perf_counter()
+            quick_check_row = conn.execute("PRAGMA quick_check").fetchone()
+            quick_check_latency = round((time.perf_counter() - quick_check_start) * 1000, 2)
+            quick_check_result = str(quick_check_row[0]) if quick_check_row else "unknown"
+            checks["db_integrity"] = {
+                "ok": quick_check_result.lower() == "ok",
+                "result": quick_check_result,
+                "latency_ms": quick_check_latency,
+            }
+
+            vectorless_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM memories WHERE vector_rowid IS NULL"
+            ).fetchone()
+            checks["vectorless"] = {
+                "ok": True,
+                "count": int(vectorless_row["c"]) if vectorless_row else 0,
+            }
+
+            db_path = Path(storage.db_path)
+            checks["disk_usage"] = {
+                "ok": db_path.exists(),
+                "db_path": str(db_path),
+                "db_size_bytes": db_path.stat().st_size if db_path.exists() else None,
+            }
+        except Exception as exc:
+            checks["db_integrity"]["error"] = str(exc)
+    else:
+        checks["db_integrity"]["error"] = "storage pool not initialised"
+
+    if _embedder:
+        embed_start = time.perf_counter()
+        try:
+            await asyncio.wait_for(_embedder.embed("health_probe_deep"), timeout=5.0)
+            checks["embedding"] = {
+                "ok": True,
+                "latency_ms": round((time.perf_counter() - embed_start) * 1000, 2),
+            }
+        except Exception as exc:
+            checks["embedding"] = {
+                "ok": False,
+                "latency_ms": round((time.perf_counter() - embed_start) * 1000, 2),
+                "error": str(exc),
+            }
+    else:
+        checks["embedding"]["error"] = "embedder not configured"
+
+    core_ok = (
+        checks["db_integrity"].get("ok", False)
+        and checks["vectorless"].get("ok", False)
+        and checks["disk_usage"].get("ok", False)
+    )
+    embedding_ok = checks["embedding"].get("ok", False)
+
+    if core_ok and embedding_ok:
+        status = "ok"
+    elif core_ok or storage_available:
+        status = "degraded"
+    else:
+        status = "down"
+
+    return {
+        "status": status,
+        "uptime_seconds": round(time.time() - _start_time, 1),
+        "checks": checks,
+    }
 
 
 @app.get("/v1/metrics")
