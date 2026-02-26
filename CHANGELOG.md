@@ -1,96 +1,111 @@
-# CHANGELOG
+# Changelog
 
-## [1.0.0](https://github.com/dorukardahan/asuman-memory/compare/v0.4.0...v1.0.0) (2026-02-22)
+All notable changes to this project will be documented in this file.
 
-### Features
-- Reranker for improved recall precision
-- Resilient embedding with graceful fallback
-- Automated backfill for memories missing embeddings
-- Generic cleanup and garbage collection
+This project adheres to [Semantic Versioning](https://semver.org/).
 
-### CI/CD
-- python-semantic-release with conventional commits
-- Automated changelog generation
-- Generic rescore script with CLI args
+## [1.0.0] - 2026-02-26
 
-### Fixes
-- Fixed auth bypass in CI test environment
-- CI timeout configuration
+Production-ready release with full monitoring, per-agent security, and 173 tests.
 
-## [0.4.0](https://github.com/dorukardahan/asuman-memory/compare/v0.3.0...v0.4.0) (2026-02-19)
+### Added
+- Per-agent API key restrictions (key-level agent scope enforcement)
+- Prometheus metrics endpoint (`/v1/metrics/prometheus`) with request/cache/memory gauges
+- Request duration histograms and cache hit/miss tracking in middleware
+- Memory compression endpoint (`/v1/compress`) for summarizing old long memories
+- Parallel search: semantic + keyword run concurrently via asyncio
 
-### Features
-- Temporal parsing — natural language time expressions in search queries
-- Feature registry — modular feature toggle system
-- GC endpoint for memory cleanup
-- Importance-adjusted decay — rate varies by memory importance
-- Noise filters for low-quality memories
+### Fixed
+- Cache miss tracking on parse failures
+- Status type hint in metrics middleware
 
-### Fixes
-- Temporal parsing review fixes + single-word patterns
-- Synced with live VPS production state
+## [0.9.0] - 2026-02-25
 
-## [0.3.0](https://github.com/dorukardahan/asuman-memory/compare/v0.2.1...v0.3.0) (2026-02-18)
+### Added
+- Parallel search execution (semantic + keyword via `asyncio.create_task`)
+- Memory compression module (`agent_memory/compression.py`)
+- `/v1/compress` endpoint with dry_run support
 
-### Features
-- Security hardening — API key auth, audit logging, input validation
-- CI/CD pipeline — GitHub Actions with ruff lint + pytest
-- Metrics — memory usage stats and health endpoints
-- Export/Import — bulk memory endpoints
-- Improved consolidation — better dedup and merge logic
-- PR template for contributions
+## [0.8.0] - 2026-02-25
 
-### Fixes
-- Resolved all ruff lint errors
-- Graceful audit log handler for CI environment
-- Repo cleanup — version sync, README rewrite
+### Added
+- Graceful degradation: `search_mode` and `degraded` flags in recall response
+- Amnesia detection endpoint (`/v1/amnesia-check`) with coverage scoring
+- Namespace support for memory isolation (`namespace` param on recall/store)
+- Post-compaction restore validation hook
+- Pre-session save hook (auto-pin important memories)
 
-## [0.2.1](https://github.com/dorukardahan/asuman-memory/compare/v0.2.0...v0.2.1) (2026-02-17)
+## [0.7.0] - 2026-02-25
 
-### Features
-- Memory system overhaul — 15 improvements across P0, P1, P2 priorities
-- Improved recall accuracy and ranking
-- Better deduplication and noise filtering
-- Enhanced consolidation pipeline
+### Added
+- Adaptive reranker gating (skip cross-encoder when score spread > threshold)
+- MMR diversity post-processing for search results
+- Critical memory pinning (`/v1/pin`, `/v1/unpin`) — pinned memories survive decay/gc
+- Context budget (`max_tokens`) on `/v1/recall` with token estimation
+- Memory type classification (fact/preference/rule/conversation) on ingest
+- Deep health check endpoint (`/v1/health/deep`)
+- API key rotation endpoint (`/v1/admin/rotate-key`) with multi-key support
 
-## [0.2.0](https://github.com/dorukardahan/asuman-memory/compare/v0.1.1...v0.2.0) (2026-02-16)
+### Fixed
+- Weight drift: importance weight 0.25 → 0.08 (aligned with config)
+- Smart recall gating: expanded anti-trigger patterns
 
-### Features
-- Per-agent routing — each agent gets its own memory database
-- Package rename: `asuman_memory` → `agent_memory` (fully generic)
-- Instruction capture — detects and stores user preferences
-- KG conflict detection — catches contradicting memories
-- Caching layer for frequently accessed memories
-- Multi-agent session sync — 13 typed relation patterns
-- Aggressive Ebbinghaus decay tuning
+## [0.6.0] - 2026-02-24
 
-### Docs
-- Complete README rewrite
-- Dual memory architecture guide
-- Embedding integration documentation
+### Added
+- Docker support (Dockerfile + docker-compose.yml)
+- Hardware auto-detection script (5 profiles: minimal → gpu)
 
-## [0.1.1](https://github.com/dorukardahan/asuman-memory/compare/v0.1.0...v0.1.1) (2026-02-08)
+### Fixed
+- Path resolution standardized to 3-tier logic (env var → ~/.agent-memory → ~/.asuman)
+- CI compatibility: `sys.executable` instead of hardcoded venv paths
+- Crontab security: API key read from file instead of inline
 
-### Features
-- B12 Patterns — Ebbinghaus forgetting curve decay, write-time merge, consolidation
-- Genericized codebase — preparing for multi-agent use
-- Improved architecture diagram
+## [0.5.0] - 2026-02-22
 
-### Fixes
-- Pass config search weights to HybridSearch correctly
-- Security + performance + resilience improvements
-- Removed remaining Asuman-specific references
+### Added
+- 15 search and storage improvements
+- Embed worker with circuit breaker (5 fail → 5min cooldown)
+- Background asyncio worker for vector backfill
 
-## [0.1.0](https://github.com/dorukardahan/asuman-memory/releases/tag/v0.1.0) (2026-02-04)
+### Fixed
+- Vectorless memories: 5 silent failure paths identified and fixed
+- `/v1/import` retry logic (3 attempts)
+- All ruff lint errors resolved (22 → 0)
 
-### Features
-- Complete `asuman_memory` package — hybrid search (vector + keyword)
-- Turkish NLP with Zeyrek lemmatizer
-- SQLite + sqlite-vec for vector storage
-- FastAPI REST API (port 8787)
-- systemd service + OpenClaw sync integration
-- Production polish — backup scripts, logrotate, test suite
-- Configurable decay and importance scoring
+## [0.4.0] - 2026-02-19
 
-### Security
-- Removed hardcoded API keys
+### Added
+- Multi-agent session sync with typed relation patterns
+- 13 semantic relation types for knowledge graph
+- Aggressive Ebbinghaus decay with importance adjustment
+
+## [0.3.0] - 2026-02-18
+
+### Added
+- Instruction capture and conflict detection
+- Search result caching
+- Knowledge graph integration
+- Security hardening (API key auth, audit logging, rate limiting)
+- CI/CD pipeline (GitHub Actions: lint + test)
+- Operational metrics endpoint (`/v1/metrics`)
+
+## [0.2.0] - 2026-02-16
+
+### Added
+- Per-agent database routing (multi-agent support)
+- Package rename: `asuman_memory` → `agent_memory`
+- Ebbinghaus strength decay with spaced repetition
+- Write-time semantic merge (deduplication)
+- Memory consolidation endpoint
+
+## [0.1.0] - 2026-02-04
+
+### Added
+- Initial release
+- Hybrid search: semantic (sqlite-vec) + keyword (FTS5 BM25)
+- FastAPI REST API with SQLite storage
+- OpenClaw session sync integration
+- Entity extraction and knowledge graph
+- Memory importance scoring
+- Export/import endpoints
