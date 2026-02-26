@@ -346,7 +346,7 @@ app.add_middleware(RateLimitMiddleware, max_requests=120, window_seconds=60)
 # API key authentication
 _api_key = os.environ.get("AGENT_MEMORY_API_KEY", "")
 _extra_keys_path = os.path.join(
-    os.environ.get("AGENT_MEMORY_DATA_DIR", os.path.expanduser("~/.agent-memory-legacy")),
+    os.environ.get("AGENT_MEMORY_DATA_DIR", os.path.expanduser("~/.agent-memory")),
     "memory-api-keys.json",
 )
 if _api_key:
