@@ -125,17 +125,17 @@ class MetricsCollector:
         snap = self.snapshot()
         lines: list[str] = []
 
-        lines.append("# HELP asuman_memory_requests_total Total HTTP requests processed.")
-        lines.append("# TYPE asuman_memory_requests_total counter")
+        lines.append("# HELP agent_memory_requests_total Total HTTP requests processed.")
+        lines.append("# TYPE agent_memory_requests_total counter")
         for (method, path, status), count in sorted(snap["requests_total"].items()):
             lines.append(
-                "asuman_memory_requests_total"
+                "agent_memory_requests_total"
                 f'{{method="{_label_escape(method)}",path="{_label_escape(path)}",status="{_label_escape(status)}"}} '
                 f"{int(count)}"
             )
 
-        lines.append("# HELP asuman_memory_request_duration_seconds HTTP request latency in seconds.")
-        lines.append("# TYPE asuman_memory_request_duration_seconds histogram")
+        lines.append("# HELP agent_memory_request_duration_seconds HTTP request latency in seconds.")
+        lines.append("# TYPE agent_memory_request_duration_seconds histogram")
         duration_buckets: Dict[str, list[int]] = snap["request_duration_bucket_counts"]
         duration_sum: Dict[str, float] = snap["request_duration_sum"]
         duration_count: Dict[str, int] = snap["request_duration_count"]
@@ -144,51 +144,51 @@ class MetricsCollector:
             buckets = duration_buckets[path]
             for upper_bound, bucket_value in zip(self.REQUEST_DURATION_BUCKETS, buckets):
                 lines.append(
-                    "asuman_memory_request_duration_seconds_bucket"
+                    "agent_memory_request_duration_seconds_bucket"
                     f'{{path="{path_label}",le="{_format_bucket(upper_bound)}"}} '
                     f"{int(bucket_value)}"
                 )
 
             lines.append(
-                "asuman_memory_request_duration_seconds_bucket"
+                "agent_memory_request_duration_seconds_bucket"
                 f'{{path="{path_label}",le="+Inf"}} '
                 f"{int(duration_count.get(path, 0))}"
             )
             lines.append(
-                "asuman_memory_request_duration_seconds_sum"
+                "agent_memory_request_duration_seconds_sum"
                 f'{{path="{path_label}"}} '
                 f"{_format_float(float(duration_sum.get(path, 0.0)))}"
             )
             lines.append(
-                "asuman_memory_request_duration_seconds_count"
+                "agent_memory_request_duration_seconds_count"
                 f'{{path="{path_label}"}} '
                 f"{int(duration_count.get(path, 0))}"
             )
 
-        lines.append("# HELP asuman_memory_cache_hits_total Total search cache hits.")
-        lines.append("# TYPE asuman_memory_cache_hits_total counter")
-        lines.append(f"asuman_memory_cache_hits_total {snap['cache_hits_total']}")
+        lines.append("# HELP agent_memory_cache_hits_total Total search cache hits.")
+        lines.append("# TYPE agent_memory_cache_hits_total counter")
+        lines.append(f"agent_memory_cache_hits_total {snap['cache_hits_total']}")
 
-        lines.append("# HELP asuman_memory_cache_misses_total Total search cache misses.")
-        lines.append("# TYPE asuman_memory_cache_misses_total counter")
-        lines.append(f"asuman_memory_cache_misses_total {snap['cache_misses_total']}")
+        lines.append("# HELP agent_memory_cache_misses_total Total search cache misses.")
+        lines.append("# TYPE agent_memory_cache_misses_total counter")
+        lines.append(f"agent_memory_cache_misses_total {snap['cache_misses_total']}")
 
-        lines.append("# HELP asuman_memory_memories_total Total memories stored, by agent.")
-        lines.append("# TYPE asuman_memory_memories_total gauge")
+        lines.append("# HELP agent_memory_memories_total Total memories stored, by agent.")
+        lines.append("# TYPE agent_memory_memories_total gauge")
         for agent, total in sorted(snap["memories_total_by_agent"].items()):
             lines.append(
-                "asuman_memory_memories_total"
+                "agent_memory_memories_total"
                 f'{{agent="{_label_escape(agent)}"}} '
                 f"{int(total)}"
             )
 
-        lines.append("# HELP asuman_memory_vectorless_total Total memories without vectors.")
-        lines.append("# TYPE asuman_memory_vectorless_total gauge")
-        lines.append(f"asuman_memory_vectorless_total {int(snap['vectorless_total'])}")
+        lines.append("# HELP agent_memory_vectorless_total Total memories without vectors.")
+        lines.append("# TYPE agent_memory_vectorless_total gauge")
+        lines.append(f"agent_memory_vectorless_total {int(snap['vectorless_total'])}")
 
-        lines.append("# HELP asuman_memory_embed_queue_depth Estimated embed worker queue depth.")
-        lines.append("# TYPE asuman_memory_embed_queue_depth gauge")
-        lines.append(f"asuman_memory_embed_queue_depth {int(snap['embed_queue_depth'])}")
+        lines.append("# HELP agent_memory_embed_queue_depth Estimated embed worker queue depth.")
+        lines.append("# TYPE agent_memory_embed_queue_depth gauge")
+        lines.append(f"agent_memory_embed_queue_depth {int(snap['embed_queue_depth'])}")
 
         return "\n".join(lines) + "\n"
 

@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SERVICE="${OPENCLAW_MEMORY_SERVICE:-asuman-memory}"
+SERVICE="${OPENCLAW_MEMORY_SERVICE:-agent-memory}"
 API_URL="${OPENCLAW_MEMORY_API_URL:-http://127.0.0.1:8787}"
 SCRIPTS_DIR="${ROOT_DIR}/scripts"
 
@@ -28,13 +28,13 @@ if [ -f "${ENV_FILE}" ]; then
   set +a
 fi
 
-# Resolve DB path: env var > ~/.agent-memory > legacy ~/.asuman
+# Resolve DB path: env var > ~/.agent-memory > legacy ~/.agent-memory-legacy
 if [ -n "${AGENT_MEMORY_DB:-}" ]; then
   DB_PATH="$AGENT_MEMORY_DB"
 elif [ -d "${HOME}/.agent-memory" ]; then
   DB_PATH="${HOME}/.agent-memory/memory.sqlite"
-elif [ -d "${HOME}/.asuman" ]; then
-  DB_PATH="${HOME}/.asuman/memory.sqlite"
+elif [ -d "${HOME}/.agent-memory-legacy" ]; then
+  DB_PATH="${HOME}/.agent-memory-legacy/memory.sqlite"
 else
   DB_PATH="${HOME}/.agent-memory/memory.sqlite"
 fi

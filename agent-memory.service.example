@@ -13,19 +13,19 @@ Type=simple
 User=root
 
 # >>> CHANGE these paths <<<
-WorkingDirectory=/opt/your-org/asuman-memory
-ExecStart=/opt/your-org/asuman-memory/.venv/bin/python -m agent_memory
+WorkingDirectory=/opt/your-org/agent-memory
+ExecStart=/opt/your-org/agent-memory/.venv/bin/python -m agent_memory
 
 Restart=always
 RestartSec=5
 
 # >>> CHANGE to your env file path <<<
 # This file should contain OPENROUTER_API_KEY, AGENT_MEMORY_API_KEY, etc.
-EnvironmentFile=/opt/your-org/asuman-memory/.env
+EnvironmentFile=/opt/your-org/agent-memory/.env
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=asuman-memory
+SyslogIdentifier=agent-memory
 
 # Hardening
 NoNewPrivileges=yes

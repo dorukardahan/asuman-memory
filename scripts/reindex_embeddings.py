@@ -33,11 +33,11 @@ import requests
 
 # ─── Configuration (from environment, matching agent_memory/config.py) ───
 def _resolve_db_path() -> str:
-    """Resolve DB path: env var > ~/.agent-memory > legacy ~/.asuman."""
+    """Resolve DB path: env var > ~/.agent-memory > legacy fallback."""
     if os.environ.get("AGENT_MEMORY_DB"):
         return os.path.expanduser(os.environ["AGENT_MEMORY_DB"])
     new_dir = os.path.expanduser("~/.agent-memory")
-    legacy_dir = os.path.expanduser("~/.asuman")
+    legacy_dir = os.path.expanduser("~/.agent-memory-legacy")
     if os.path.isdir(legacy_dir) and not os.path.isdir(new_dir):
         return os.path.join(legacy_dir, "memory.sqlite")
     return os.path.join(new_dir, "memory.sqlite")

@@ -6,13 +6,13 @@
 
 set -euo pipefail
 
-# Resolve data dir: env var > ~/.agent-memory > legacy ~/.asuman
+# Resolve data dir: env var > ~/.agent-memory > legacy ~/.agent-memory-legacy
 if [ -n "${AGENT_MEMORY_DATA_DIR:-}" ]; then
   MEMORY_DIR="$AGENT_MEMORY_DATA_DIR"
 elif [ -d "${HOME}/.agent-memory" ]; then
   MEMORY_DIR="${HOME}/.agent-memory"
-elif [ -d "${HOME}/.asuman" ]; then
-  MEMORY_DIR="${HOME}/.asuman"
+elif [ -d "${HOME}/.agent-memory-legacy" ]; then
+  MEMORY_DIR="${HOME}/.agent-memory-legacy"
 else
   MEMORY_DIR="${HOME}/.agent-memory"
 fi

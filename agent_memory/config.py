@@ -27,7 +27,7 @@ class Config:
     embedding_dimensions: int = 2560
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
-    # Storage — default path; falls back to legacy ~/.asuman/ if it exists
+    # Storage — default path; falls back to legacy directory if it exists
     db_path: str = ""  # resolved in load_config()
 
     # API
@@ -231,7 +231,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     # --- Default db_path resolution ---------------------------------------
     if not cfg.db_path:
         new_dir = Path.home() / ".agent-memory"
-        legacy_dir = Path.home() / ".asuman"
+        legacy_dir = Path.home() / ".agent-memory-legacy"
         if legacy_dir.exists() and not new_dir.exists():
             cfg.db_path = str(legacy_dir / "memory.sqlite")
         else:

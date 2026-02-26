@@ -57,7 +57,7 @@ Production-ready release with full monitoring, per-agent security, and 173 tests
 - Hardware auto-detection script (5 profiles: minimal → gpu)
 
 ### Fixed
-- Path resolution standardized to 3-tier logic (env var → ~/.agent-memory → ~/.asuman)
+- Path resolution standardized to 3-tier logic (env var → ~/.agent-memory → legacy fallback)
 - CI compatibility: `sys.executable` instead of hardcoded venv paths
 - Crontab security: API key read from file instead of inline
 

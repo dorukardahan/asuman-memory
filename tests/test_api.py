@@ -350,7 +350,7 @@ class TestMetrics:
     async def test_prometheus_metrics_endpoint(self, client):
         resp = await client.get("/v1/metrics/prometheus")
         assert resp.status_code == 200
-        assert "asuman_memory" in resp.text
+        assert "agent_memory" in resp.text
         assert "text/plain" in resp.headers.get("content-type", "")
 
 

@@ -79,7 +79,7 @@ _rule_detector = RuleDetector()
 # Audit logging handler (file-based, graceful fallback for CI/test)
 try:
     _default_audit_dir = os.environ.get("AGENT_MEMORY_DATA_DIR") or (
-        str(Path.home() / ".asuman") if (Path.home() / ".asuman").exists() and not (Path.home() / ".agent-memory").exists()
+        str(Path.home() / ".agent-memory-legacy") if (Path.home() / ".agent-memory-legacy").exists() and not (Path.home() / ".agent-memory").exists()
         else str(Path.home() / ".agent-memory")
     )
     _audit_log_path = os.environ.get("AGENT_MEMORY_AUDIT_LOG", os.path.join(_default_audit_dir, "agent-memory-audit.log"))
@@ -346,7 +346,7 @@ app.add_middleware(RateLimitMiddleware, max_requests=120, window_seconds=60)
 # API key authentication
 _api_key = os.environ.get("AGENT_MEMORY_API_KEY", "")
 _extra_keys_path = os.path.join(
-    os.environ.get("AGENT_MEMORY_DATA_DIR", os.path.expanduser("~/.asuman")),
+    os.environ.get("AGENT_MEMORY_DATA_DIR", os.path.expanduser("~/.agent-memory-legacy")),
     "memory-api-keys.json",
 )
 if _api_key:

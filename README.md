@@ -239,9 +239,9 @@ All configuration is environment-driven. `AGENT_MEMORY_*` variables are canonica
 | `AGENT_MEMORY_EMBED_WORKER_ENABLED` | `true` | Enable background embed worker (auto-embeds vectorless memories) |
 | `AGENT_MEMORY_EMBED_WORKER_INTERVAL` | `300` | Seconds between embed worker sweeps |
 
-\* `AGENT_MEMORY_DB` fallback behavior in code: if `$HOME/.asuman` exists and `$HOME/.agent-memory` does not, default becomes `$HOME/.asuman/memory.sqlite`.
+\* `AGENT_MEMORY_DB` fallback behavior: if a legacy data directory exists and `$HOME/.agent-memory` does not, the legacy path is used as default.
 
-Legacy fallbacks are still accepted when the new key is unset: `ASUMAN_MEMORY_CONFIG`, `ASUMAN_MEMORY_DB`, `ASUMAN_MEMORY_MODEL`, `ASUMAN_MEMORY_PORT`, `ASUMAN_MEMORY_DIMENSIONS`, `ASUMAN_MEMORY_HOST`, `ASUMAN_SESSIONS_DIR`.
+Legacy environment variable prefixes from earlier versions are still accepted as fallbacks when the standard `AGENT_MEMORY_*` key is unset.
 
 ## Cron Jobs
 
@@ -292,17 +292,17 @@ Alternatively, use OpenRouter cloud: set `OPENROUTER_BASE_URL=https://openrouter
 
 ### 2) Memory API service
 
-Use `asuman-memory.service.example` as the base unit file:
+Use `agent-memory.service.example` as the base unit file:
 
 ```bash
-sudo cp asuman-memory.service.example /etc/systemd/system/asuman-memory.service
+sudo cp agent-memory.service.example /etc/systemd/system/agent-memory.service
 # Edit paths and EnvironmentFile in the unit
 sudo systemctl daemon-reload
-sudo systemctl enable --now asuman-memory
-sudo systemctl status asuman-memory --no-pager
+sudo systemctl enable --now agent-memory
+sudo systemctl status agent-memory --no-pager
 ```
 
-Keep secrets in an env file (e.g. `/etc/asuman-memory.env`) referenced by the service `EnvironmentFile=` entry.
+Keep secrets in an env file (e.g. `/etc/agent-memory.env`) referenced by the service `EnvironmentFile=` entry.
 
 ### 3) Multi-agent provisioning
 
@@ -367,7 +367,7 @@ All memory operations are handled by the Agent Memory API via hooks — OpenClaw
 - [ ] Copy and configure hooks from `hooks/` directory
 - [ ] Disable OpenClaw native `memorySearch`
 - [ ] Back up SQLite DB regularly (`/v1/export` or `scripts/backup_db.sh`)
-- [ ] Monitor: `/v1/health`, `/v1/metrics`, `journalctl -u asuman-memory`
+- [ ] Monitor: `/v1/health`, `/v1/metrics`, `journalctl -u agent-memory`
 
 ## API Usage Examples
 
@@ -457,10 +457,10 @@ cd -
 sudo mkdir -p /var/log
 # Edit BOTH service files: fix paths marked with ">>> CHANGE <<<" comments
 sudo cp embedding-server.service.example /etc/systemd/system/embedding-server.service
-sudo cp asuman-memory.service.example /etc/systemd/system/asuman-memory.service
+sudo cp agent-memory.service.example /etc/systemd/system/agent-memory.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now embedding-server
-sudo systemctl enable --now asuman-memory
+sudo systemctl enable --now agent-memory
 
 # 5. Verify
 curl -s http://127.0.0.1:8787/v1/health

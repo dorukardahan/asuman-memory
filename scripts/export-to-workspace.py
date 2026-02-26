@@ -6,12 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 def _resolve_data_dir() -> Path:
-    """Resolve data dir: env var > ~/.agent-memory > legacy ~/.asuman."""
+    """Resolve data dir: env var > ~/.agent-memory > legacy fallback."""
     env_dir = os.environ.get("AGENT_MEMORY_DATA_DIR")
     if env_dir:
         return Path(env_dir).expanduser()
     new_dir = Path.home() / ".agent-memory"
-    legacy_dir = Path.home() / ".asuman"
+    legacy_dir = Path.home() / ".agent-memory-legacy"
     if legacy_dir.is_dir() and not new_dir.is_dir():
         return legacy_dir
     return new_dir

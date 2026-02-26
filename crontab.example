@@ -3,7 +3,7 @@
 # All times are in the system timezone.
 #
 # Prerequisites:
-#   - Memory API running (systemctl start asuman-memory)
+#   - Memory API running (systemctl start agent-memory)
 #   - .env file configured
 #   - API key file at ~/.agent-memory/memory-api-key (or set AGENT_MEMORY_API_KEY_FILE)
 #   - Embedding server running (llama-server on port 8090)
@@ -36,7 +36,7 @@ LOG_DIR=$REPO/logs
 
 # ─── Vectorless Backfill (every 6 hours) ───────────────────────────────
 # Re-embeds memories that failed initial embedding (uses flock to prevent overlap)
-0 */6 * * * flock -n /tmp/asuman-backfill.lock bash -c 'set -a; . $REPO/.env; set +a; mkdir -p $REPO/logs; $REPO/.venv/bin/python $REPO/scripts/backfill_vectors.py --agent all --batch-size 2 --max-sub-batch 2 --sleep-between-batches 1.0' >> $LOG_DIR/backfill.log 2>&1
+0 */6 * * * flock -n /tmp/agent-memory-backfill.lock bash -c 'set -a; . $REPO/.env; set +a; mkdir -p $REPO/logs; $REPO/.venv/bin/python $REPO/scripts/backfill_vectors.py --agent all --batch-size 2 --max-sub-batch 2 --sleep-between-batches 1.0' >> $LOG_DIR/backfill.log 2>&1
 
 # ─── SQLite Backup (daily 7am) ─────────────────────────────────────────
 # Hot backup of all SQLite databases
