@@ -340,3 +340,39 @@ class TestIngestSessions:
         )
 
         assert len(progress_calls) >= 1
+
+
+class TestClassifyMemoryType:
+    """Tests for classify_memory_type including lesson detection."""
+
+    def test_lesson_feedback_turkish(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("[Feedback] neden doğrulamadın bunu") == "lesson"
+
+    def test_lesson_fabrication(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("Bu bir fabrication hatasıydı") == "lesson"
+
+    def test_lesson_tag(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("[Lesson] Önce kodu oku, sonra öner") == "lesson"
+
+    def test_lesson_trust(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("Bu güveni sarsar, dikkat et") == "lesson"
+
+    def test_lesson_already_exists(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("aa zaten varmış bu özellik") == "lesson"
+
+    def test_fact_still_works(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("Ahmet works at Acme Corp") == "fact"
+
+    def test_preference_still_works(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("I prefer dark mode always") == "preference"
+
+    def test_conversation_fallback(self):
+        from agent_memory.ingest import classify_memory_type
+        assert classify_memory_type("Merhaba, nasılsın?") == "conversation"

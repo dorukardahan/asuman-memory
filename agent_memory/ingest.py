@@ -78,13 +78,27 @@ _PREFERENCE_KEYWORDS_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+_LESSON_KEYWORDS_RE = re.compile(
+    r"\b(?:lesson|ders(?:i|im|ler)?|hata\s*(?:yaptı|pattern|tekrar)|"
+    r"fabrication|bir\s*daha\s*yapma|neden\s*doğrulamadın|"
+    r"kaç\s*kere\s*(?:dedim|söyledim)|"
+    r"learned|mistake|never\s*again|don'?t\s*repeat|"
+    r"güven(?:i|ini)?\s*(?:kaybett|sarsar|kırıl)|"
+    r"\[Lesson\]|\[Feedback\]|"
+    r"aa\s*(?:zaten\s*)?varmış|zaten\s*var(?:mış)?)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 def classify_memory_type(text: str) -> str:
-    """Classify memory text into fact/preference/rule/conversation."""
+    """Classify memory text into lesson/fact/preference/rule/conversation."""
     content = (text or "").strip()
     if not content:
         return "conversation"
 
+    # Lesson detection first (highest priority — behavioral corrections)
+    if _LESSON_KEYWORDS_RE.search(content):
+        return "lesson"
     if _ENTITY_NAME_RE.search(content) or _FACTUAL_PATTERNS_RE.search(content):
         return "fact"
     if _PREFERENCE_KEYWORDS_RE.search(content):

@@ -511,6 +511,7 @@ class MemoryStorage:
                    END
                  WHERE deleted_at IS NULL
                    AND COALESCE(pinned, 0) = 0
+                   AND COALESCE(memory_type, 'other') != 'lesson'
                    AND (
                        (COALESCE(last_accessed_at, created_at) < ? - 604800) -- stale
                        OR
@@ -527,6 +528,39 @@ class MemoryStorage:
                 min_strength,
             )
 
+            # Phase 1b: Lesson decay (3x slower — lessons survive much longer)
+            # 90+ days stale -> floor, 21-day protect window, 21-90 days -> gentle decay
+            lesson_cur = conn.execute(
+                """
+                UPDATE memories
+                   SET strength = CASE
+                       WHEN (COALESCE(last_accessed_at, created_at) < ? - 7776000)
+                            THEN ?
+                       WHEN (COALESCE(last_accessed_at, created_at) >= ? - 86400)
+                            THEN MIN(COALESCE(strength, 1.0) + 0.1, 5.0)
+                       WHEN (COALESCE(last_accessed_at, created_at) >= ? - 1814400)
+                            THEN MAX(COALESCE(strength, 1.0), 0.8)
+                       ELSE MAX(
+                           COALESCE(strength, 1.0) - 0.05,
+                           ?
+                       )
+                   END
+                 WHERE deleted_at IS NULL
+                   AND COALESCE(pinned, 0) = 0
+                   AND COALESCE(memory_type, 'other') = 'lesson'
+                   AND (
+                       (COALESCE(last_accessed_at, created_at) < ? - 1814400)
+                       OR
+                       (COALESCE(last_accessed_at, created_at) >= ? - 86400)
+                   )
+                """,
+                (now, min_strength, now, now, min_strength, now, now),
+            )
+            conn.commit()
+            lesson_decayed = int(lesson_cur.rowcount or 0)
+            if lesson_decayed:
+                logger.info("Decay phase 1b: lesson decay=%d (3x slower rate)", lesson_decayed)
+
             # Phase 2: GC — soft-delete zombies at strength floor with low importance,
             # unaccessed for 14+ days
             gc_cur = conn.execute(
@@ -535,6 +569,7 @@ class MemoryStorage:
                    SET deleted_at = CAST(strftime('%s', 'now') AS INTEGER)
                  WHERE deleted_at IS NULL
                    AND COALESCE(pinned, 0) = 0
+                   AND COALESCE(memory_type, 'other') != 'lesson'
                    AND strength <= ?
                    AND importance <= 0.3
                    AND COALESCE(last_accessed_at, created_at) < ? - 1209600
