@@ -387,8 +387,9 @@ class HybridSearch:
                     return [SearchResult(**r) for r in cached_data]
                 except Exception as exc:
                     logger.warning("Failed to parse cached search results: %s", exc)
-
-            collector.inc_cache_miss()
+                    collector.inc_cache_miss()
+            else:
+                collector.inc_cache_miss()
 
         candidate_limit = max(limit * 4, 20)
 

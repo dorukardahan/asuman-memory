@@ -129,7 +129,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             collector.record_request(
                 request.method,
                 request.url.path,
-                str(response.status_code),
+                response.status_code,
                 duration_seconds,
             )
             return response
