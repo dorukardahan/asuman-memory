@@ -10,8 +10,10 @@ Updated for v0.3.0: uses StoragePool + per-agent caches.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 
 import agent_memory.api as api_module
@@ -282,6 +284,88 @@ class TestForget:
     async def test_forget_no_params(self, client):
         resp = await client.request("DELETE", "/v1/forget", json={})
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /v1/compress
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestCompress:
+    async def test_compress_dry_run(self, client):
+        long_text = "Bu test için uzun bir hafıza cümlesidir. " * 40
+        store_resp = await client.post("/v1/store", json={"text": long_text, "importance": 0.4})
+        assert store_resp.status_code == 200
+        memory_id = store_resp.json()["id"]
+
+        storage = api_module._storage_pool.get("main")
+        conn = storage._get_conn()
+        old_timestamp = time.time() - (8 * 86400)
+        conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old_timestamp, memory_id))
+        conn.commit()
+
+        resp = await client.post("/v1/compress", json={"age_days": 7, "min_chars": 100, "dry_run": True})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "compressed" in data
+        assert data["compressed"] >= 1
+        assert data["dry_run"] is True
+
+        row = conn.execute("SELECT text FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        assert row is not None
+        assert row["text"] == long_text
+
+    async def test_compress_skips_pinned(self, client):
+        long_text = "Pinlenen hafıza sıkıştırılmamalıdır. " * 40
+        store_resp = await client.post("/v1/store", json={"text": long_text, "importance": 0.4})
+        assert store_resp.status_code == 200
+        memory_id = store_resp.json()["id"]
+
+        pin_resp = await client.post("/v1/pin", json={"id": memory_id})
+        assert pin_resp.status_code == 200
+        assert pin_resp.json()["pinned"] is True
+
+        storage = api_module._storage_pool.get("main")
+        conn = storage._get_conn()
+        old_timestamp = time.time() - (8 * 86400)
+        conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old_timestamp, memory_id))
+        conn.commit()
+
+        resp = await client.post("/v1/compress", json={"age_days": 7, "min_chars": 100})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["compressed"] == 0
+
+        row = conn.execute("SELECT text FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        assert row is not None
+        assert row["text"] == long_text
+
+
+# ---------------------------------------------------------------------------
+# /v1/metrics/prometheus
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestMetrics:
+    async def test_prometheus_metrics_endpoint(self, client):
+        resp = await client.get("/v1/metrics/prometheus")
+        assert resp.status_code == 200
+        assert "asuman_memory" in resp.text
+        assert "text/plain" in resp.headers.get("content-type", "")
+
+
+# ---------------------------------------------------------------------------
+# _check_allowed_agent
+# ---------------------------------------------------------------------------
+
+def test_per_agent_key_restriction():
+    request = SimpleNamespace(state=SimpleNamespace(allowed_agent="agent-alpha"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        api_module._check_allowed_agent(request, "agent-beta")
+
+    assert exc_info.value.status_code == 403
+    assert "restricted to agent 'agent-alpha'" in exc_info.value.detail
 
 
 # ---------------------------------------------------------------------------
