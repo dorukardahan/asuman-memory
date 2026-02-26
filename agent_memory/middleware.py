@@ -18,6 +18,8 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from .metrics import collector
+
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("audit")
 
@@ -120,8 +122,21 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         return False, None
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        started_at = time.perf_counter()
+
+        def _record_request_metrics(response: Response) -> Response:
+            duration_seconds = time.perf_counter() - started_at
+            collector.record_request(
+                request.method,
+                request.url.path,
+                str(response.status_code),
+                duration_seconds,
+            )
+            return response
+
         if request.url.path in self.EXEMPT_PATHS:
-            return await call_next(request)
+            response = await call_next(request)
+            return _record_request_metrics(response)
 
         key = request.headers.get("X-API-Key", "")
         is_valid, allowed_agent = self._validate_key(key) if key else (False, None)
@@ -131,15 +146,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 request.client.host if request.client else "unknown",
                 request.url.path,
             )
-            return JSONResponse(
+            return _record_request_metrics(JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or missing API key"},
-            )
+            ))
 
         # None -> admin key (all agents), "<agent>" -> restricted key
         request.state.allowed_agent = allowed_agent
 
-        return await call_next(request)
+        response = await call_next(request)
+        return _record_request_metrics(response)
 
 
 # ---------------------------------------------------------------------------

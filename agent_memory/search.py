@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .config import Config, load_config
+from .metrics import collector
 from .reranker import CrossEncoderReranker
 from .storage import MemoryStorage
 from .triggers import get_confidence_tier
@@ -382,9 +383,12 @@ class HybridSearch:
                 try:
                     cached_data = json.loads(cached_json)
                     self.last_search_mode = "cache_hit"
+                    collector.inc_cache_hit()
                     return [SearchResult(**r) for r in cached_data]
                 except Exception as exc:
                     logger.warning("Failed to parse cached search results: %s", exc)
+
+            collector.inc_cache_miss()
 
         candidate_limit = max(limit * 4, 20)
 
