@@ -26,12 +26,13 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
+import re
 import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
 
@@ -39,7 +40,8 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from starlette.responses import JSONResponse
 from .middleware import APIKeyMiddleware, RateLimitMiddleware, AuditLogMiddleware
@@ -376,9 +378,15 @@ async def http_exception_handler(request, exc):
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     logger.warning("Validation error: %s (path=%s)", str(exc)[:200], request.url.path)
+    errors = exc.errors()
+    status_code = 422
+    error_message = "Validation error"
+    if any(err.get("type") == "agent_format" for err in errors):
+        status_code = 400
+        error_message = "Invalid agent id"
     return JSONResponse(
-        status_code=422,
-        content={"error": "Validation error", "detail": exc.errors()},
+        status_code=status_code,
+        content={"error": error_message, "detail": errors},
     )
 
 @app.exception_handler(Exception)
@@ -395,52 +403,88 @@ async def general_exception_handler(request, exc):
 # Request / response models
 # ---------------------------------------------------------------------------
 
-class RecallRequest(BaseModel):
+
+VALID_MEMORY_TYPES = Literal["fact", "preference", "rule", "conversation", "lesson", "other"]
+NAMESPACE_PATTERN = re.compile(r'^[a-z0-9._-]{1,64}$')
+AGENT_PATTERN = re.compile(r'^[a-z0-9_-]{1,64}$')
+
+
+class RequestModel(BaseModel):
+    @field_validator("namespace", check_fields=False)
+    @classmethod
+    def _validate_namespace(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if not NAMESPACE_PATTERN.fullmatch(value):
+            raise PydanticCustomError("namespace_format", "Invalid namespace format")
+        return value
+
+    @field_validator("agent", check_fields=False)
+    @classmethod
+    def _validate_agent(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if value == "all":
+            return value
+        if not AGENT_PATTERN.fullmatch(value):
+            raise PydanticCustomError("agent_format", "Invalid agent format")
+        return value
+
+class RecallRequest(RequestModel):
     query: str = Field(..., min_length=1, max_length=2000)
     limit: int = Field(default=5, ge=1, le=50)
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     max_tokens: Optional[int] = Field(default=None, ge=100, le=100000,
                                        description="Trim results to fit within this token budget")
     namespace: Optional[str] = Field(default=None, description="Filter by namespace (None = all)")
-    memory_type: Optional[str] = Field(default=None, description="Filter by memory type")
+    memory_type: Optional[VALID_MEMORY_TYPES] = Field(default=None, description="Filter by memory type")
     agent: Optional[str] = None
 
 
-class CaptureRequest(BaseModel):
-    messages: List[Dict[str, Any]]
+class CaptureRequest(RequestModel):
+    messages: List[Dict[str, Any]] = Field(..., max_length=200)
     agent: Optional[str] = None
 
+    @field_validator("messages")
+    @classmethod
+    def _validate_messages(cls, value: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for msg in value:
+            text = (msg.get("text") or msg.get("content") or "")
+            if len(str(text)) > 50000:
+                raise PydanticCustomError("message_text_length", "Message text exceeds max length (50000)")
+        return value
 
-class StoreRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=10000)
+
+class StoreRequest(RequestModel):
+    text: str = Field(..., min_length=1, max_length=50000)
     category: str = "other"
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     namespace: str = Field(default="default", description="Namespace for topic-based grouping")
     agent: Optional[str] = None
 
 
-class ForgetRequest(BaseModel):
+class ForgetRequest(RequestModel):
     id: Optional[str] = None
     query: Optional[str] = None
     agent: Optional[str] = None
 
 
-class DecayRequest(BaseModel):
+class DecayRequest(RequestModel):
     agent: Optional[str] = None
 
 
-class ConsolidateRequest(BaseModel):
+class ConsolidateRequest(RequestModel):
     agent: Optional[str] = None
 
 
-class CompressRequest(BaseModel):
+class CompressRequest(RequestModel):
     agent: Optional[str] = None
     age_days: int = Field(default=30, ge=7, description="Compress memories older than this many days")
     min_chars: int = Field(default=500, ge=100, description="Only compress memories longer than this")
     dry_run: bool = Field(default=False, description="Preview without actually compressing")
 
 
-class GCRequest(BaseModel):
+class GCRequest(RequestModel):
     agent: Optional[str] = None
     soft_deleted_days: int = Field(default=30, ge=7, description="Purge memories soft-deleted for this many days")
 
@@ -660,7 +704,7 @@ async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
     if req.agent == "all":
         raise HTTPException(400, "Cannot store to 'all' -- specify an agent")
 
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
 
     vector = None
     if _embedder:
@@ -710,12 +754,12 @@ async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
 
 
 @app.post("/v1/rule")
-async def store_rule(req: StoreRequest) -> Dict[str, Any]:
+async def store_rule(req: StoreRequest, request: Request) -> Dict[str, Any]:
     """Explicitly store a rule/instruction (safeword bypass)."""
     if req.agent == "all":
         raise HTTPException(400, "Cannot store to 'all' -- specify an agent")
 
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
 
     vector = None
     if _embedder:
@@ -751,32 +795,32 @@ async def store_rule(req: StoreRequest) -> Dict[str, Any]:
 
 
 @app.post("/v1/pin")
-async def pin_memory(req: ForgetRequest) -> Dict[str, Any]:
+async def pin_memory(req: ForgetRequest, request: Request) -> Dict[str, Any]:
     """Pin a memory: protects it from decay, gc, and consolidation."""
     if not req.id:
         raise HTTPException(400, "Provide 'id'")
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
     pinned = storage.pin_memory(req.id)
     return {"pinned": pinned, "id": req.id}
 
 
 @app.post("/v1/unpin")
-async def unpin_memory(req: ForgetRequest) -> Dict[str, Any]:
+async def unpin_memory(req: ForgetRequest, request: Request) -> Dict[str, Any]:
     """Unpin a memory: allows decay/gc/consolidation again."""
     if not req.id:
         raise HTTPException(400, "Provide 'id'")
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
     unpinned = storage.unpin_memory(req.id)
     return {"unpinned": unpinned, "id": req.id}
 
 
 @app.delete("/v1/forget")
-async def forget(req: ForgetRequest) -> Dict[str, Any]:
+async def forget(req: ForgetRequest, request: Request) -> Dict[str, Any]:
     """Delete a memory by ID or by searching for it."""
     if req.agent == "all":
         raise HTTPException(400, "Cannot forget from 'all' -- specify an agent")
 
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
 
     if req.id:
         deleted = storage.delete_memory(req.id)
@@ -799,6 +843,7 @@ async def forget(req: ForgetRequest) -> Dict[str, Any]:
 
 @app.get("/v1/search")
 async def search_interactive(
+    request: Request,
     query: str = Query(..., min_length=1),
     limit: int = Query(default=5, ge=1, le=50),
     agent: Optional[str] = Query(default=None),
@@ -810,9 +855,9 @@ async def search_interactive(
     if agent == "all":
         # Reuse recall logic
         req = RecallRequest(query=query, limit=limit, agent="all")
-        return await _recall_all(req)
+        return await _recall_all(req, request)
 
-    search = _get_search(agent)
+    search = _get_search(agent, request=request)
     results = await search.search(query=query, limit=limit)
 
     agent_key = StoragePool.normalize_key(agent)
@@ -825,7 +870,7 @@ async def search_interactive(
 
 
 @app.post("/v1/decay")
-async def decay(req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
+async def decay(request: Request, req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
     """Run weekly Ebbinghaus strength decay (cron-friendly).
 
     Use ``agent="all"`` to decay across all agent databases.
@@ -838,7 +883,7 @@ async def decay(req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
         total_memories = 0
         per_agent: Dict[str, int] = {}
         for agent_id in _storage_pool.get_all_agents():
-            storage = _storage_pool.get(agent_id)
+            storage = _get_storage(agent_id, request=request)
             decayed = storage.decay_all(days_threshold=7, decay_amount=0.05, min_strength=0.3)
             total = storage.stats().get("total_memories", 0)
             total_decayed += decayed
@@ -846,7 +891,7 @@ async def decay(req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
             per_agent[agent_id] = decayed
         return {"decayed": total_decayed, "total": total_memories, "per_agent": per_agent}
 
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
     decayed = storage.decay_all(days_threshold=7, decay_amount=0.05, min_strength=0.3)
     total = storage.stats().get("total_memories", 0)
 
@@ -855,7 +900,7 @@ async def decay(req: DecayRequest = DecayRequest()) -> Dict[str, Any]:
 
 
 @app.post("/v1/gc")
-async def gc(req: GCRequest = GCRequest()) -> Dict[str, Any]:
+async def gc(request: Request, req: GCRequest = GCRequest()) -> Dict[str, Any]:
     """Permanently DELETE memories soft-deleted for 30+ days and clean orphaned vectors.
 
     Use ``agent="all"`` to GC across all agent databases.
@@ -868,7 +913,7 @@ async def gc(req: GCRequest = GCRequest()) -> Dict[str, Any]:
         total_vectors = 0
         per_agent: Dict[str, Dict[str, int]] = {}
         for agent_id in _storage_pool.get_all_agents():
-            storage = _storage_pool.get(agent_id)
+            storage = _get_storage(agent_id, request=request)
             result = storage.gc_purge(soft_deleted_days=req.soft_deleted_days)
             total_purged += result["purged_memories"]
             total_vectors += result["purged_vectors"]
@@ -879,7 +924,7 @@ async def gc(req: GCRequest = GCRequest()) -> Dict[str, Any]:
             "per_agent": per_agent,
         }
 
-    storage = _get_storage(req.agent)
+    storage = _get_storage(req.agent, request=request)
     result = storage.gc_purge(soft_deleted_days=req.soft_deleted_days)
 
     agent_key = StoragePool.normalize_key(req.agent)
@@ -891,7 +936,7 @@ async def gc(req: GCRequest = GCRequest()) -> Dict[str, Any]:
 
 
 @app.post("/v1/consolidate")
-async def consolidate(req: ConsolidateRequest = ConsolidateRequest()) -> Dict[str, Any]:
+async def consolidate(request: Request, req: ConsolidateRequest = ConsolidateRequest()) -> Dict[str, Any]:
     """Deduplicate and cleanup memories.
 
     1) Find memory pairs with cosine similarity > threshold
@@ -910,7 +955,7 @@ async def consolidate(req: ConsolidateRequest = ConsolidateRequest()) -> Dict[st
         per_agent: Dict[str, Dict[str, int]] = {}
         for agent_id in _storage_pool.get_all_agents():
             try:
-                result = _consolidate_single(agent_id)
+                result = _consolidate_single(agent_id, request=request)
                 total_merged += result["merged"]
                 total_archived += result["archived"]
                 per_agent[agent_id] = result
@@ -924,13 +969,13 @@ async def consolidate(req: ConsolidateRequest = ConsolidateRequest()) -> Dict[st
         }
 
     agent_key = StoragePool.normalize_key(req.agent)
-    result = _consolidate_single(agent_key)
+    result = _consolidate_single(agent_key, request=request)
     result["agent"] = agent_key
     return result
 
 
 @app.post("/v1/compress")
-async def compress(req: CompressRequest = CompressRequest()) -> Dict[str, Any]:
+async def compress(request: Request, req: CompressRequest = CompressRequest()) -> Dict[str, Any]:
     """Compress old, long memories by replacing text with summary.
 
     Pinned and high-importance (>=0.8) memories are skipped.
@@ -945,7 +990,7 @@ async def compress(req: CompressRequest = CompressRequest()) -> Dict[str, Any]:
         total = {"compressed": 0, "skipped": 0, "saved_chars": 0}
         for agent_id in _storage_pool.get_all_agents():
             try:
-                storage = _storage_pool.get(agent_id)
+                storage = _get_storage(agent_id, request=request)
                 result = compress_old_memories(
                     storage, agent=agent_id,
                     age_days=req.age_days, min_chars=req.min_chars,
@@ -960,7 +1005,7 @@ async def compress(req: CompressRequest = CompressRequest()) -> Dict[str, Any]:
         return total
 
     agent_key = StoragePool.normalize_key(req.agent)
-    storage = _get_storage(agent_key)
+    storage = _get_storage(agent_key, request=request)
     result = compress_old_memories(
         storage, agent=agent_key,
         age_days=req.age_days, min_chars=req.min_chars,
@@ -970,9 +1015,9 @@ async def compress(req: CompressRequest = CompressRequest()) -> Dict[str, Any]:
     return result
 
 
-def _consolidate_single(agent_id: str) -> Dict[str, Any]:
+def _consolidate_single(agent_id: str, request: Optional[Request] = None) -> Dict[str, Any]:
     """Run consolidation on a single agent's database."""
-    storage = _storage_pool.get(agent_id)
+    storage = _get_storage(agent_id, request=request)
     conn = storage._get_conn()
     now = time.time()
 
@@ -1176,6 +1221,7 @@ def _consolidate_single(agent_id: str) -> Dict[str, Any]:
 
 @app.get("/v1/stats")
 async def stats(
+    request: Request,
     agent: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
     """Return memory statistics.
@@ -1189,7 +1235,7 @@ async def stats(
         per_agent: Dict[str, Dict[str, Any]] = {}
         totals = {"total_memories": 0, "entities": 0, "relationships": 0, "temporal_facts": 0}
         for agent_id in _storage_pool.get_all_agents():
-            s = _storage_pool.get(agent_id).stats()
+            s = _get_storage(agent_id, request=request).stats()
             per_agent[agent_id] = s
             totals["total_memories"] += s.get("total_memories", 0)
             totals["entities"] += s.get("entities", 0)
@@ -1197,14 +1243,14 @@ async def stats(
             totals["temporal_facts"] += s.get("temporal_facts", 0)
         return {**totals, "per_agent": per_agent}
 
-    storage = _get_storage(agent)
+    storage = _get_storage(agent, request=request)
     s = storage.stats()
     s["agent"] = StoragePool.normalize_key(agent)
     return s
 
 
 @app.get("/v1/agents")
-async def list_agents() -> Dict[str, Any]:
+async def list_agents(request: Request) -> Dict[str, Any]:
     """List all known agent memory databases."""
     if _storage_pool is None:
         raise HTTPException(503, "Storage pool not initialised")
@@ -1212,7 +1258,7 @@ async def list_agents() -> Dict[str, Any]:
     agents = _storage_pool.get_all_agents()
     details: Dict[str, Any] = {}
     for agent_id in agents:
-        storage = _storage_pool.get(agent_id)
+        storage = _get_storage(agent_id, request=request)
         s = storage.stats()
         details[agent_id] = {
             "total_memories": s.get("total_memories", 0),
@@ -1375,6 +1421,7 @@ async def metrics_prometheus() -> Any:
 
 @app.get("/v1/metrics")
 async def metrics(
+    request: Request,
     agent: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
     """Return operational metrics for monitoring."""
@@ -1385,7 +1432,7 @@ async def metrics(
     agent_counts = {}
     total_memories = 0
     if agent and agent != "all":
-        s = _get_storage(agent).stats()
+        s = _get_storage(agent, request=request).stats()
         agent_counts[StoragePool.normalize_key(agent)] = s.get("total_memories", 0)
         total_memories = s.get("total_memories", 0)
     else:
@@ -1406,6 +1453,7 @@ async def metrics(
 
 @app.get("/v1/export")
 async def export_memories(
+    request: Request,
     agent: Optional[str] = Query(default=None),
     include_deleted: bool = Query(default=False),
 ) -> List[Dict[str, Any]]:
@@ -1418,7 +1466,7 @@ async def export_memories(
         raise HTTPException(503, "Storage pool not initialised")
 
     agent_key = StoragePool.normalize_key(agent) if agent else None
-    storage = _get_storage(agent_key)
+    storage = _get_storage(agent_key, request=request)
     conn = storage._get_conn()
 
     where = "" if include_deleted else "WHERE deleted_at IS NULL"
@@ -1451,15 +1499,24 @@ async def export_memories(
     return result
 
 
-class ImportRequest(BaseModel):
+class ImportRequest(RequestModel):
     """Import request: list of memory objects."""
-    memories: List[Dict[str, Any]] = Field(..., min_length=1)
+    memories: List[Dict[str, Any]] = Field(..., min_length=1, max_length=500)
     agent: Optional[str] = None
     skip_duplicates: bool = True
 
+    @field_validator("memories")
+    @classmethod
+    def _validate_memories(cls, value: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for mem in value:
+            text = mem.get("text", "")
+            if text is not None and len(str(text)) > 50000:
+                raise PydanticCustomError("memory_text_length", "Memory text exceeds max length (50000)")
+        return value
+
 
 @app.post("/v1/import")
-async def import_memories(req: ImportRequest) -> Dict[str, Any]:
+async def import_memories(req: ImportRequest, request: Request) -> Dict[str, Any]:
     """Import memories from JSONL/JSON array.
 
     Each memory object must have at least ``text``.
@@ -1470,7 +1527,7 @@ async def import_memories(req: ImportRequest) -> Dict[str, Any]:
         raise HTTPException(503, "Storage pool not initialised")
 
     agent_key = StoragePool.normalize_key(req.agent) if req.agent else None
-    storage = _get_storage(agent_key)
+    storage = _get_storage(agent_key, request=request)
 
     imported = 0
     skipped = 0
@@ -1534,7 +1591,7 @@ async def import_memories(req: ImportRequest) -> Dict[str, Any]:
 # Amnesia Detection
 # ---------------------------------------------------------------------------
 
-class AmnesiaCheckRequest(BaseModel):
+class AmnesiaCheckRequest(RequestModel):
     topics: List[str] = Field(..., min_length=1, max_length=20,
                                description="Topics to check coverage for")
     agent: Optional[str] = None
@@ -1542,13 +1599,13 @@ class AmnesiaCheckRequest(BaseModel):
 
 
 @app.post("/v1/amnesia-check")
-async def amnesia_check(req: AmnesiaCheckRequest) -> Dict[str, Any]:
+async def amnesia_check(req: AmnesiaCheckRequest, request: Request) -> Dict[str, Any]:
     """Check how well the agent remembers a list of topics.
 
     Returns a coverage score (0-1) and per-topic match details.
     Useful for post-compaction validation and memory health monitoring.
     """
-    search = _get_search(req.agent)
+    search = _get_search(req.agent, request=request)
     agent_key = StoragePool.normalize_key(req.agent)
 
     topic_results = []
@@ -1586,7 +1643,7 @@ async def amnesia_check(req: AmnesiaCheckRequest) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.post("/v1/admin/rotate-key")
-async def rotate_key(expire_old_hours: int = 24) -> Dict[str, Any]:
+async def rotate_key(request: Request, expire_old_hours: int = 24) -> Dict[str, Any]:
     """Generate a new API key and optionally expire the current extra keys.
 
     - Generates a new 32-byte URL-safe key
@@ -1595,6 +1652,10 @@ async def rotate_key(expire_old_hours: int = 24) -> Dict[str, Any]:
     - Returns the new key (only time it's visible!)
     """
     import json as _json
+
+    # Only admin keys (no agent restriction) can rotate
+    if hasattr(request.state, "allowed_agent") and request.state.allowed_agent is not None:
+        raise HTTPException(status_code=403, detail="Only admin keys can rotate keys")
 
     new_key = secrets.token_urlsafe(32)
     keys_path = _extra_keys_path
