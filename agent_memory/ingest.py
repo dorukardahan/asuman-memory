@@ -90,6 +90,50 @@ _LESSON_KEYWORDS_RE = re.compile(
 )
 
 
+
+# ---------------------------------------------------------------------------
+# Prompt injection sanitization
+# ---------------------------------------------------------------------------
+
+_INJECTION_PATTERNS = [
+    # System prompt overrides
+    re.compile(r'<\s*system\s*>', re.IGNORECASE),
+    re.compile(r'\[SYSTEM\]', re.IGNORECASE),
+    re.compile(r'You are now\s', re.IGNORECASE),
+    re.compile(r'Ignore (?:all )?previous instructions', re.IGNORECASE),
+    re.compile(r'Ignore (?:all )?above instructions', re.IGNORECASE),
+    re.compile(r'Disregard (?:all )?previous', re.IGNORECASE),
+    re.compile(r'New instructions:', re.IGNORECASE),
+    re.compile(r'OVERRIDE:', re.IGNORECASE),
+    # Role hijacking
+    re.compile(r'(?:pretend|act|behave)\s+(?:as if\s+)?you\s+are', re.IGNORECASE),
+    re.compile(r'from now on,?\s+you', re.IGNORECASE),
+    # Tool call injection
+    re.compile(r'<(?:tool_use|function_call|antml:invoke)', re.IGNORECASE),
+    # Turkish variants
+    re.compile(r'önceki talimatları(?:nı)?\s+(?:unut|görmezden gel|yok say)', re.IGNORECASE),
+    re.compile(r'yeni talimat(?:lar)?:', re.IGNORECASE),
+]
+
+
+def sanitize_memory_text(text: str) -> str:
+    """Strip or defang prompt injection patterns from memory text.
+
+    Returns sanitized text. Adds [SANITIZED] prefix if any pattern was found.
+    """
+    found = False
+    sanitized = text
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(sanitized):
+            sanitized = pattern.sub('[REDACTED]', sanitized)
+            found = True
+
+    if found:
+        sanitized = f'[SANITIZED] {sanitized}'
+
+    return sanitized
+
+
 def classify_memory_type(text: str) -> str:
     """Classify memory text into lesson/fact/preference/rule/conversation."""
     content = (text or "").strip()

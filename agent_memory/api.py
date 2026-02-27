@@ -622,6 +622,8 @@ async def capture(req: CaptureRequest, request: Request) -> Dict[str, Any]:
         if len(text) < 3:
             continue
         role = msg.get("role", "user")
+        from agent_memory.ingest import sanitize_memory_text as _sanitize
+        text = _sanitize(text)
         cleaned.append({
             "text": text[:4000],  # raised from 2000 [S10, 2026-02-17]
             "role": role,
@@ -728,7 +730,8 @@ async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
         importance = 1.0
         logger.info("Rule detected in /v1/store: %s", req.text[:60])
 
-    from .ingest import classify_memory_type
+    from .ingest import classify_memory_type, sanitize_memory_text
+    req.text = sanitize_memory_text(req.text)
 
     res = storage.merge_or_store(
         text=req.text,
@@ -1570,6 +1573,8 @@ async def import_memories(req: ImportRequest, request: Request) -> Dict[str, Any
                             exc,
                         )
 
+        from agent_memory.ingest import sanitize_memory_text as _sanitize_imp
+        text = _sanitize_imp(text)
         storage.store_memory(
             text=text,
             vector=vector,

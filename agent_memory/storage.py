@@ -868,6 +868,23 @@ class MemoryStorage:
 
         return ids
 
+
+    # SECURITY: All WHERE fragments are static strings from code, never from user input.
+    # Values are always parameterized via ? placeholders.
+    _ALLOWED_WHERE_FRAGMENTS = frozenset([
+        "vector_rowid = ?", "id = ?", "deleted_at IS NULL", "importance >= 0.3",
+        "namespace = ?", "COALESCE(memory_type, 'other') = ?",
+        "COALESCE(lesson_status, 'active') = 'active'",
+    ])
+
+    @staticmethod
+    def _safe_where_query(table: str, columns: str, fragments: list, params: list):
+        """Build SELECT query from pre-approved WHERE fragments only."""
+        for f in fragments:
+            assert f in MemoryStorage._ALLOWED_WHERE_FRAGMENTS, f"Unapproved WHERE fragment: {f}"
+        sql = f"SELECT {columns} FROM {table} WHERE {' AND '.join(fragments)}"
+        return sql, tuple(params)
+
     # ------------------------------------------------------------------
     # Vector search
     # ------------------------------------------------------------------
@@ -917,10 +934,8 @@ class MemoryStorage:
                 params.append(memory_type)
                 if memory_type == "lesson":
                     where.append("COALESCE(lesson_status, 'active') = 'active'")
-            mem = conn.execute(
-                f"SELECT * FROM memories WHERE {' AND '.join(where)}",
-                tuple(params),
-            ).fetchone()
+            sql, safe_params = self._safe_where_query("memories", "*", where, params)
+            mem = conn.execute(sql, safe_params).fetchone()
             if mem:
                 d = dict(mem)
                 d["score"] = round(similarity, 4)
@@ -968,10 +983,8 @@ class MemoryStorage:
                 params.append(memory_type)
                 if memory_type == "lesson":
                     where.append("COALESCE(lesson_status, 'active') = 'active'")
-            mem = conn.execute(
-                f"SELECT * FROM memories WHERE {' AND '.join(where)}",
-                tuple(params),
-            ).fetchone()
+            sql, safe_params = self._safe_where_query("memories", "*", where, params)
+            mem = conn.execute(sql, safe_params).fetchone()
             if mem:
                 d = dict(mem)
                 d["bm25_rank"] = r["rank"]
