@@ -1,6 +1,9 @@
-const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
-const MEMORY_API = `${MEMORY_API_BASE}/v1`;
-const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
+import { readFileSync } from "node:fs";
+
+const MEMORY_API = "http://localhost:8787/v1";
+const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.asuman/memory-api-key`;
+let _memoryApiKey = "";
+try { _memoryApiKey = readFileSync(API_KEY_PATH, "utf-8").trim(); } catch (e) { console.warn("[realtime-capture] error:", e.message || e); }
 
 const DECISION_MARKERS = [
   /\bkarar\b/i,
@@ -12,21 +15,59 @@ const DECISION_MARKERS = [
   /\blet'?s do\b/i,
 ];
 
-const CRON_PATTERNS = [
-  /^\[cron:/i,
-  /steward-engage/i,
-  /steward-post/i,
-  /\/steward-/i,
-  /HEARTBEAT_OK/i,
+const CRON_PATTERNS = [/^\[cron:/i, /steward-engage/i, /steward-post/i, /\/steward-/i, /HEARTBEAT_OK/i];
+
+// Feedback patterns: user correcting agent behavior (TR + EN)
+const FEEDBACK_TAG_PATTERNS = {
+  verification: [
+    /neden\s*(?:doğrulamadın|kontrol\s*etmedin|bakmadın)/i,
+    /verify/i,
+    /doğrula/i,
+  ],
+  fabrication: [
+    /fabrication/i,
+    /yanlış\s*(?:bilgi|söyledin)/i,
+    /uydur(?:ma|dun)/i,
+  ],
+  premature_suggestion: [
+    /öner(?:i|im)/i,
+    /premature\s*suggestion/i,
+    /too\s*early\s*to\s*suggest/i,
+  ],
+  did_not_read_code: [
+    /kodu\s*(?:okumadın|incelemedin)/i,
+    /did\s*not\s*read\s*code/i,
+    /read\s*the\s*code\s*first/i,
+  ],
+};
+
+const FEEDBACK_MARKERS = [
+  /kaç\s*kere\s*(?:dedim|söyledim)/i,
+  /neden\s*(?:doğrulamadın|kontrol\s*etmedin|bakmadın)/i,
+  /bir\s*daha\s*yapma/i,
+  /hata\s*(?:yaptın|yapıyorsun|tekrar)/i,
+  /yanlış\s*(?:yaptın|bilgi|söyledin)/i,
+  /fabrication/i,
+  /güven(?:i|ini)?\s*(?:kaybett|sarsar|kırıl)/i,
+  /sürekli\s*(?:aynı|böyle|yanlış)/i,
+  /aa\s*(?:zaten\s*)?varmış/i,
+  /don'?t\s*(?:repeat|do\s*that|make\s*that)/i,
+  /never\s*again/i,
+  /wrong\s*(?:again|info)/i,
+  /how\s*many\s*times/i,
 ];
 
-function isCronNoise(text = "") {
-  return CRON_PATTERNS.some((p) => p.test(text));
+function detectFeedbackTags(text = "") {
+  const tags = [];
+  for (const [tag, patterns] of Object.entries(FEEDBACK_TAG_PATTERNS)) {
+    if (patterns.some((p) => p.test(text))) tags.push(tag);
+  }
+  return tags.length > 0 ? tags : ["verification"];
 }
 
-function isDecision(text = "") {
-  return DECISION_MARKERS.some((p) => p.test(text));
-}
+function isCronNoise(text = "") { return CRON_PATTERNS.some((p) => p.test(text)); }
+function isDecision(text = "") { return DECISION_MARKERS.some((p) => p.test(text)); }
+function isFeedback(text = "") { return FEEDBACK_MARKERS.some((p) => p.test(text)); }
 
 function scoreImportance(text = "") {
   if (!text || text.length < 15 || isCronNoise(text)) return 0;
@@ -43,16 +84,11 @@ async function store(text, category, importance, agent = "main") {
   try {
     await fetch(`${MEMORY_API}/store`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": MEMORY_API_KEY,
-      },
+      headers: { "Content-Type": "application/json", "X-API-Key": _memoryApiKey },
       body: JSON.stringify({ text: text.slice(0, 3000), category, importance, agent }),
       signal: AbortSignal.timeout(15000),
     });
-  } catch {
-    // non-critical
-  }
+  } catch (e) { console.warn("[realtime-capture] error:", e.message || e); }
 }
 
 const realtimeCaptureHook = async (event, ctx) => {
@@ -64,7 +100,13 @@ const realtimeCaptureHook = async (event, ctx) => {
     lastUserTs = Date.now();
 
     const agentId = ctx?.agentId || "main";
-
+    
+    if (isFeedback(content)) {
+      const tags = detectFeedbackTags(content);
+      const tagged = tags.map((tag) => `[tag=${tag}]`).join("");
+      await store(`[Feedback]${tagged}[lang=tr] ${content}`, "lesson", 0.95, agentId);
+      return;
+    }
     if (isDecision(content)) {
       await store(`[Decision] ${content}`, "decision", 0.9, agentId);
     } else if (content.length > 50) {

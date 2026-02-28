@@ -1,0 +1,49 @@
+# Asuman Memory API — systemd service example
+# Install: sudo cp asuman-memory.service.example /etc/systemd/system/asuman-memory.service
+# Then:    sudo systemctl daemon-reload && sudo systemctl enable --now asuman-memory
+#
+# Adjust User, Group, WorkingDirectory, and paths to match your installation.
+
+[Unit]
+Description=Asuman Memory API
+After=network.target
+
+[Service]
+# Set HF_HOME so the reranker model cache is found
+Environment=HF_HOME=/home/<YOUR_USER>/.cache/huggingface
+
+Type=simple
+
+# Run as a dedicated non-root user (recommended)
+User=<YOUR_USER>
+Group=<YOUR_GROUP>
+
+# Path to the cloned repo
+WorkingDirectory=/opt/asuman/asuman-memory
+
+# Python from the project virtualenv
+ExecStart=/opt/asuman/asuman-memory/venv/bin/python -m agent_memory
+
+Restart=always
+RestartSec=5
+
+# Load environment variables (API keys, model config, etc.)
+# Create this file from .env.example
+EnvironmentFile=/home/<YOUR_USER>/.asuman/memory.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=asuman-memory
+
+# ── Security hardening ──────────────────────────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=no
+PrivateTmp=yes
+# Grant write access only to data and log directories
+ReadWritePaths=/home/<YOUR_USER>/.asuman /opt/asuman/asuman-memory/logs /home/<YOUR_USER>/.cache
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

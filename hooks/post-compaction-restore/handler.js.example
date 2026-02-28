@@ -13,14 +13,86 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+const MEMORY_API = "http://localhost:8787/v1";
+const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.asuman/memory-api-key`;
+
+async function getApiKey() {
+  try {
+    return (await fs.readFile(API_KEY_PATH, "utf-8")).trim();
+  } catch {
+    return "";
+  }
+}
+
+function getAgentId(workspaceDir) {
+  const base = path.basename(workspaceDir);
+  if (base === "workspace") return "main";
+  if (base.startsWith("workspace-")) return base.replace("workspace-", "");
+  return "main";
+}
+
+/**
+ * Post-restore validation: verify pinned/critical memories are still accessible.
+ * Queries memory API for high-importance items and logs coverage.
+ */
+async function validateMemoryIntegrity(agentId, snapshotMessages) {
+  try {
+    const apiKey = await getApiKey();
+    if (!apiKey) return;
+
+    // Check if pinned memories are accessible
+    const res = await fetch(`${MEMORY_API}/recall`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+      body: JSON.stringify({
+        query: "important decision preference rule",
+        limit: 5,
+        agent: agentId,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await res.json();
+    const count = data.count || 0;
+
+    if (count === 0) {
+      console.warn(
+        `[post-compaction-restore] ⚠️ AMNESIA WARNING: no critical memories found for ${agentId}`
+      );
+    } else {
+      console.warn(
+        `[post-compaction-restore] ✅ Memory validation OK: ${count} critical memories accessible for ${agentId}`
+      );
+    }
+
+    // Cross-check: do snapshot topics appear in memory?
+    if (snapshotMessages && snapshotMessages.length > 0) {
+      const topicQuery = snapshotMessages
+        .map((m) => m.text.slice(0, 50))
+        .join(" ");
+      const topicRes = await fetch(`${MEMORY_API}/recall`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+        body: JSON.stringify({ query: topicQuery.slice(0, 500), limit: 3, agent: agentId }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const topicData = await topicRes.json();
+      const topicCount = topicData.count || 0;
+      console.warn(
+        `[post-compaction-restore] Topic coverage: ${topicCount}/3 matches for recent session topics`
+      );
+    }
+  } catch (err) {
+    console.warn(`[post-compaction-restore] validation error: ${err.message}`);
+  }
+}
+
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
-const DEFAULT_WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR || "/path/to/openclaw/workspace";
 
 // --- Phase 1: after_compaction — record that compaction happened ---
 async function handleCompaction(event) {
   const context = event.context || {};
-  const workspaceDir = context.workspaceDir || context.cfg?.workspace?.dir || DEFAULT_WORKSPACE_DIR;
+  const workspaceDir =
+    context.workspaceDir || context.cfg?.workspace?.dir || process.env.OPENCLAW_WORKSPACE || `${process.env.HOME}/.openclaw/workspace`;
   const flagPath = path.join(workspaceDir, "memory", "compaction-flag.json");
 
   const flag = {
@@ -47,7 +119,8 @@ async function handleBootstrap(event) {
   const context = event.context;
   if (!context || !context.bootstrapFiles) return;
 
-  const workspaceDir = context.workspaceDir || context.cfg?.workspace?.dir || DEFAULT_WORKSPACE_DIR;
+  const workspaceDir =
+    context.workspaceDir || context.cfg?.workspace?.dir || process.env.OPENCLAW_WORKSPACE || `${process.env.HOME}/.openclaw/workspace`;
   const flagPath = path.join(workspaceDir, "memory", "compaction-flag.json");
   const snapshotPath = path.join(workspaceDir, "memory", "critical-context-snapshot.json");
 
@@ -114,6 +187,10 @@ async function handleBootstrap(event) {
     console.warn(
       `[post-compaction-restore] injected COMPACTION_RECOVERY (${snapshot.recentMessages.length} msgs)`
     );
+
+    // Post-restore validation: verify memory integrity
+    const agentId = getAgentId(workspaceDir);
+    await validateMemoryIntegrity(agentId, snapshot.recentMessages);
   } catch (err) {
     console.warn(`[post-compaction-restore] ${err.code || err.message}`);
   }

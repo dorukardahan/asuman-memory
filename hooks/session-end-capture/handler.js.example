@@ -4,23 +4,58 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
-const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
-const MEMORY_API = `${MEMORY_API_BASE}/v1`;
-const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
+const MEMORY_API = "http://localhost:8787/v1";
+const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.asuman/memory-api-key`;
+let _memoryApiKey = "";
+try { _memoryApiKey = readFileSync(API_KEY_PATH, "utf-8").trim(); } catch (e) { console.warn("[session-end-capture] error:", e.message || e); }
 
-const OPENCLAW_HOME =
-  process.env.OPENCLAW_HOME || path.join(process.env.HOME || ".", ".openclaw");
-const DEFAULT_WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR || path.join(OPENCLAW_HOME, "workspace");
+const OPENCLAW_DIR = process.env.OPENCLAW_DIR || `${process.env.HOME}/.openclaw`;
 
-function resolveWorkspaceDir(agentId = "main") {
-  if (agentId === "main") return DEFAULT_WORKSPACE_DIR;
-  if (DEFAULT_WORKSPACE_DIR.endsWith("workspace")) {
-    return `${DEFAULT_WORKSPACE_DIR}-${agentId}`;
-  }
-  return path.join(OPENCLAW_HOME, `workspace-${agentId}`);
+const SUGGESTION_PATTERNS = [/önerim/i, /ekleyelim/i, /suggest/i, /recommend/i];
+const VERIFICATION_TOOL_PATTERNS = [/exec/i, /read/i, /web_fetch/i];
+
+function isSuggestionText(text = "") {
+  return SUGGESTION_PATTERNS.some((p) => p.test(text));
+}
+
+function hasVerificationSignal(entry = {}) {
+  const haystack = JSON.stringify(entry || {});
+  return VERIFICATION_TOOL_PATTERNS.some((p) => p.test(haystack));
+}
+
+async function detectUnverifiedSuggestion(sessionFilePath) {
+  try {
+    const raw = await fs.readFile(sessionFilePath, "utf-8");
+    const lines = raw.trim().split("
+").filter(Boolean);
+    const entries = lines.map((line) => {
+      try { return JSON.parse(line); } catch (e) { console.warn("[session-end-capture] error:", e.message || e); return null; }
+    }).filter(Boolean);
+
+    let hasPriorVerification = false;
+    for (const entry of entries) {
+      if (hasVerificationSignal(entry)) {
+        hasPriorVerification = true;
+        continue;
+      }
+
+      if (entry?.type !== "message") continue;
+      const role = entry?.message?.role;
+      if (role !== "assistant") continue;
+
+      const content = entry?.message?.content;
+      const text = Array.isArray(content)
+        ? content.find((c) => c.type === "text")?.text
+        : content;
+
+      if (isSuggestionText(text || "") && !hasPriorVerification) {
+        return true;
+      }
+    }
+  } catch (e) { console.warn("[session-end-capture] error:", e.message || e); }
+  return false;
 }
 
 function findSessionFile(sessionId, agentId = "main") {
@@ -28,8 +63,8 @@ function findSessionFile(sessionId, agentId = "main") {
 
   // Search order: per-agent dir first, then global fallback
   const searchDirs = [
-    path.join(OPENCLAW_HOME, "agents", agentId, "sessions"),
-    path.join(OPENCLAW_HOME, "sessions"),
+    path.join(OPENCLAW_DIR, "agents", agentId, "sessions"),
+    path.join(OPENCLAW_DIR, "sessions"),
   ];
 
   for (const sessionsDir of searchDirs) {
@@ -40,9 +75,7 @@ function findSessionFile(sessionId, agentId = "main") {
           return path.join(sessionsDir, f);
         }
       }
-    } catch {
-      // ignore missing dirs
-    }
+    } catch (e) { console.warn("[session-end-capture] error:", e.message || e); }
   }
   return null;
 }
@@ -70,13 +103,12 @@ async function getSessionMessages(sessionFilePath, count = 15) {
         if (text && text.length > 10 && !text.startsWith("/")) {
           messages.push({ role, text: text.slice(0, 1000) });
         }
-      } catch {
-        // skip malformed JSONL line
-      }
+      } catch (e) { console.warn("[session-end-capture] error:", e.message || e); }
     }
 
     return messages.slice(-count);
-  } catch {
+  } catch (e) {
+    console.warn("[session-end-capture] error:", e.message || e);
     return [];
   }
 }
@@ -101,6 +133,40 @@ function buildQAPairs(messages) {
   return pairs;
 }
 
+
+async function checkPatternEscalation(agent, tag, apiKey) {
+  try {
+    const resp = await fetch('http://localhost:8787/v1/recall', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({ query: tag, agent, limit: 10, memory_type: 'lesson' })
+    });
+    const data = await resp.json();
+    const sameTag = (data.results || []).filter(r => r.category === tag);
+
+    if (sameTag.length >= 3) {
+      const ruleText = `AUTO-RULE (${sameTag.length} occurrences): Pattern "${tag}" detected repeatedly. ` +
+        `Original lessons: ${sameTag.slice(0, 3).map(r => (r.text || '').substring(0, 80)).join(' | ')}`;
+
+      await fetch('http://localhost:8787/v1/store', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+        body: JSON.stringify({
+          content: ruleText,
+          agent,
+          source: 'auto_escalation',
+          importance: 0.98,
+          memory_type: 'rule',
+          namespace: 'behavioral'
+        })
+      });
+      console.warn(`[session-end-capture] Auto-escalated pattern "${tag}" to rule (${sameTag.length} lessons)`);
+    }
+  } catch (e) {
+    console.warn('[session-end-capture] pattern escalation error:', e.message);
+  }
+}
+
 const sessionEndCaptureHook = async (event, ctx) => {
   const sessionId = event?.sessionId || ctx?.sessionId;
   const agentId = ctx?.agentId || "main";
@@ -121,10 +187,7 @@ const sessionEndCaptureHook = async (event, ctx) => {
   try {
     await fetch(`${MEMORY_API}/capture`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": MEMORY_API_KEY,
-      },
+      headers: { "Content-Type": "application/json", "X-API-Key": _memoryApiKey },
       body: JSON.stringify({
         messages: pairs.map((p) => ({ role: p.role || "assistant", text: p.text })),
         agent: agentId,
@@ -136,7 +199,30 @@ const sessionEndCaptureHook = async (event, ctx) => {
   }
 
   try {
-    const workspaceDir = resolveWorkspaceDir(agentId);
+    const shouldStoreAutoLesson = await detectUnverifiedSuggestion(sessionFile);
+    if (shouldStoreAutoLesson) {
+      await fetch(`${MEMORY_API}/store`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": _memoryApiKey },
+        body: JSON.stringify({
+          text: "[Auto-Lesson][tag=verification] Suggested without verifiable check before recommendation.",
+          category: "lesson",
+          importance: 0.90,
+          agent: agentId,
+          source: "session_capture",
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      // Check if pattern should be escalated to a rule
+      await checkPatternEscalation(agentId, "verification", _memoryApiKey);
+    }
+  } catch (err) {
+    console.warn(`[session-end-capture] auto-lesson failed: ${err.message}`);
+  }
+
+  try {
+    const workspaceDir = agentId === "main" ? process.env.OPENCLAW_WORKSPACE || `${process.env.HOME}/.openclaw/workspace` : `$HOME/.openclaw/workspace-${agentId}`;
     const memoryDir = path.join(workspaceDir, "memory");
     await fs.mkdir(memoryDir, { recursive: true });
 

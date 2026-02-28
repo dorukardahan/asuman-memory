@@ -12,16 +12,14 @@ import path from "node:path";
 
 const LOG_DIR = process.env.SUBAGENT_LOG_DIR || "./logs";
 const LOG_FILE = path.join(LOG_DIR, "subagent-completions.log");
+const MEMORY_API = "http://localhost:8787/v1";
 
-const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
-const MEMORY_API = `${MEMORY_API_BASE}/v1`;
-const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
+import { readFileSync } from "node:fs";
+const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.asuman/memory-api-key`;
+let _memoryApiKey = "";
+try { _memoryApiKey = readFileSync(API_KEY_PATH, "utf-8").trim(); } catch (e) { console.warn("[subagent-complete] error:", e.message || e); }
 
-try {
-  mkdirSync(LOG_DIR, { recursive: true });
-} catch {
-  // ignore
-}
+try { mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { console.warn("[subagent-complete] error:", e.message || e); }
 
 function ts() {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -37,7 +35,16 @@ const subagentCompleteHook = async (event) => {
   if (event.type !== "subagent" || event.action !== "complete") return;
 
   const ctx = event.context || {};
-  const { runId, childSessionKey, label, task, outcome, runtimeMs } = ctx;
+  const {
+    runId,
+    childSessionKey,
+    label,
+    task,
+    outcome,
+    startedAt,
+    endedAt,
+    runtimeMs,
+  } = ctx;
 
   const agent = label || getAgentFromSession(childSessionKey);
   const status = outcome?.status || "unknown";
@@ -62,7 +69,7 @@ const subagentCompleteHook = async (event) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-API-Key": MEMORY_API_KEY,
+          "X-API-Key": _memoryApiKey,
         },
         body: JSON.stringify({
           messages: [
@@ -75,7 +82,8 @@ const subagentCompleteHook = async (event) => {
         }),
         signal: AbortSignal.timeout(5000),
       });
-    } catch {
+    } catch (e) {
+      console.warn("[subagent-complete] error:", e.message || e);
       // Non-critical — don't block on memory capture failure
     }
   }

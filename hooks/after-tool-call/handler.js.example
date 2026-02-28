@@ -10,11 +10,12 @@
 
 import path from "node:path";
 
-const MEMORY_API_BASE = process.env.MEMORY_API_URL || "http://localhost:8787";
-const MEMORY_API = `${MEMORY_API_BASE}/v1`;
-const MEMORY_API_KEY = process.env.MEMORY_API_KEY || "YOUR_MEMORY_API_KEY";
-const DEFAULT_WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR || "/path/to/openclaw/workspace";
+const MEMORY_API = "http://localhost:8787/v1";
+import { readFileSync } from "node:fs";
+const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.asuman/memory-api-key`;
+let _memoryApiKey = "";
+try { _memoryApiKey = readFileSync(API_KEY_PATH, "utf-8").trim(); } catch (e) { console.warn("[after-tool-call] error:", e.message || e); }
+
 
 // Command patterns that indicate important operations
 const IMPORTANT_CMD_PATTERNS = [
@@ -36,19 +37,10 @@ const IMPORTANT_CMD_PATTERNS = [
   /resize2fs|growpart/i,
 ];
 
-// Patterns to SKIP (noisy/routine read-only commands)
-const SKIP_PATTERNS = [
-  /^\s*(ls|cat|head|tail|wc|echo|pwd|date|whoami|hostname|id|uptime)\b/,
-  /^\s*(grep|find|du|df|free|top|htop|ps|pgrep|lsof)\b/,
-  /^\s*(curl\s+-s.*localhost.*health|curl\s+-s.*localhost.*stats)/i,
-  /^\s*python3?\s+-c\s/,
-  /^\s*sleep\b/,
-  /warmup/i,
-  /health.*check/i,
-  /^\s*test\s/,
-  /^\s*\[/, // test expressions
-  /^\s*true\s*$/,
-  /^\s*false\s*$/,
+const CAPTURE_COMMANDS = [
+  /^(git\s|gh\s|npm\s|pip\s|curl\s|ls\s|cat\s|grep\s|find\s|wc\s)/,
+  /^(python3?\s-m\spytest)/,
+  /^(ruff\s|black\s|mypy\s)/,
 ];
 
 function getAgentId(workspaceDir) {
@@ -64,42 +56,26 @@ function shouldCapture(toolName, toolInput) {
   const cmd = (toolInput?.command || "").trim();
   if (!cmd || cmd.length < 3) return false;
 
-  // Skip routine commands
-  if (SKIP_PATTERNS.some((p) => p.test(cmd))) return false;
-
-  // Capture important commands
-  if (IMPORTANT_CMD_PATTERNS.some((p) => p.test(cmd))) return true;
-
-  // Capture any command that looks like it changes state
-  if (
-    /\b(install|update|upgrade|remove|delete|create|modify|write|enable|disable|deploy|migrate|backup)\b/i.test(
-      cmd
-    )
-  ) {
-    return true;
-  }
-
-  return false;
+  return CAPTURE_COMMANDS.some((p) => p.test(cmd));
 }
 
 function scoreToolOutput(toolInput, toolOutput) {
   const cmd = (toolInput?.command || "").toLowerCase();
-  let importance = 0.5;
+  let importance = 0.50;
 
   // Service operations
-  if (/systemctl|service\s|docker/.test(cmd)) importance = 0.8;
+  if (/systemctl|service\s|docker/.test(cmd)) importance = 0.80;
   // Deploy/release
-  if (/deploy|push|publish|release/.test(cmd)) importance = 0.9;
+  if (/deploy|push|publish|release/.test(cmd)) importance = 0.90;
   // Config changes
   if (/\.env|\.conf|\.service|config/.test(cmd)) importance = 0.75;
   // Git operations
-  if (/git\s+(push|merge|tag)/.test(cmd)) importance = 0.8;
+  if (/git\s+(push|merge|tag)/.test(cmd)) importance = 0.80;
   // Security operations
-  if (/ufw|iptables|certbot|chmod|chown/.test(cmd)) importance = 0.8;
+  if (/ufw|iptables|certbot|chmod|chown/.test(cmd)) importance = 0.80;
   // Error in output
-  if (/error|fail|denied|crash|killed|refused/i.test(toolOutput || "")) {
+  if (/error|fail|denied|crash|killed|refused/i.test(toolOutput || ""))
     importance = Math.max(importance, 0.85);
-  }
 
   return importance;
 }
@@ -115,7 +91,7 @@ const afterToolCallHook = async (event, ctx) => {
   if (!toolName) return;
   if (!shouldCapture(toolName, toolInput)) return;
 
-  const workspaceDir = ctx?.workspaceDir || DEFAULT_WORKSPACE_DIR;
+  const workspaceDir = ctx?.workspaceDir || process.env.OPENCLAW_WORKSPACE || `${process.env.HOME}/.openclaw/workspace`;
   const agentId = getAgentId(workspaceDir);
 
   const importance = scoreToolOutput(toolInput, toolOutput);
@@ -134,10 +110,7 @@ const afterToolCallHook = async (event, ctx) => {
   try {
     const res = await fetch(`${MEMORY_API}/store`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": MEMORY_API_KEY,
-      },
+      headers: { "Content-Type": "application/json", "X-API-Key": _memoryApiKey },
       body: JSON.stringify({
         text: memoryText.slice(0, 3000),
         category: "tool_output",
