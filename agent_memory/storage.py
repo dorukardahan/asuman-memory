@@ -901,7 +901,8 @@ class MemoryStorage:
     def _safe_where_query(table: str, columns: str, fragments: list, params: list):
         """Build SELECT query from pre-approved WHERE fragments only."""
         for f in fragments:
-            assert f in MemoryStorage._ALLOWED_WHERE_FRAGMENTS, f"Unapproved WHERE fragment: {f}"
+            if f not in MemoryStorage._ALLOWED_WHERE_FRAGMENTS:
+                raise ValueError(f"Unapproved WHERE fragment: {f}")
         sql = f"SELECT {columns} FROM {table} WHERE {' AND '.join(fragments)}"
         return sql, tuple(params)
 
