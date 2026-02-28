@@ -1,11 +1,11 @@
-# Asuman Memory API — systemd service example
-# Install: sudo cp asuman-memory.service.example /etc/systemd/system/asuman-memory.service
-# Then:    sudo systemctl daemon-reload && sudo systemctl enable --now asuman-memory
+# NoldoMem API — systemd service example
+# Install: sudo cp noldo-memory.service.example /etc/systemd/system/noldo-memory.service
+# Then:    sudo systemctl daemon-reload && sudo systemctl enable --now noldo-memory
 #
 # Adjust User, Group, WorkingDirectory, and paths to match your installation.
 
 [Unit]
-Description=Asuman Memory API
+Description=NoldoMem API
 After=network.target
 
 [Service]
@@ -19,21 +19,21 @@ User=<YOUR_USER>
 Group=<YOUR_GROUP>
 
 # Path to the cloned repo
-WorkingDirectory=/opt/asuman/asuman-memory
+WorkingDirectory=/opt/noldomem/noldo-memory
 
 # Python from the project virtualenv
-ExecStart=/opt/asuman/asuman-memory/venv/bin/python -m agent_memory
+ExecStart=/opt/noldomem/noldo-memory/venv/bin/python -m agent_memory
 
 Restart=always
 RestartSec=5
 
 # Load environment variables (API keys, model config, etc.)
 # Create this file from .env.example
-EnvironmentFile=/home/<YOUR_USER>/.asuman/memory.env
+EnvironmentFile=/home/<YOUR_USER>/.noldomem/memory.env
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=asuman-memory
+SyslogIdentifier=noldo-memory
 
 # ── Security hardening ──────────────────────────────────────────────────
 NoNewPrivileges=yes
@@ -41,7 +41,7 @@ ProtectSystem=strict
 ProtectHome=no
 PrivateTmp=yes
 # Grant write access only to data and log directories
-ReadWritePaths=/home/<YOUR_USER>/.asuman /opt/asuman/asuman-memory/logs /home/<YOUR_USER>/.cache
+ReadWritePaths=/home/<YOUR_USER>/.noldomem /opt/noldomem/noldo-memory/logs /home/<YOUR_USER>/.cache
 CapabilityBoundingSet=
 UMask=0077
 

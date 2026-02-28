@@ -14,7 +14,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const MEMORY_API = "http://localhost:8787/v1";
-const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.asuman/memory-api-key`;
+const API_KEY_PATH = process.env.AGENT_MEMORY_API_KEY_FILE || `${process.env.HOME}/.noldomem/memory-api-key`;
 
 async function getApiKey() {
   try {

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Automated SQLite backup for Asuman Memory
+# Automated SQLite backup for NoldoMem
 # Uses sqlite3 .backup for consistency (safe during WAL writes)
 set -euo pipefail
 
-# Auto-detect data dir (3-tier: env > ~/.agent-memory > ~/.asuman)
+# Auto-detect data dir (3-tier: env > ~/.agent-memory > ~/.noldomem)
 DATA_DIR="${AGENT_MEMORY_DATA_DIR:-}"
 if [ -z "$DATA_DIR" ]; then
     if [ -d "$HOME/.agent-memory" ]; then
         DATA_DIR="$HOME/.agent-memory"
-    elif [ -d "$HOME/.asuman" ]; then
-        DATA_DIR="$HOME/.asuman"
+    elif [ -d "$HOME/.noldomem" ]; then
+        DATA_DIR="$HOME/.noldomem"
     else
         echo "ERROR: No data directory found" >&2
         exit 1

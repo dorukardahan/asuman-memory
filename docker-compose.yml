@@ -16,7 +16,7 @@ services:
   # ── Memory API ──────────────────────────────────────────────
   memory-api:
     build: .
-    container_name: agent-memory-api
+    container_name: noldomem-api
     restart: unless-stopped
     ports:
       - "8787:8787"
@@ -43,7 +43,7 @@ services:
   # Uses pre-built llama.cpp image. Mount your GGUF model into /models.
   embedding:
     image: ghcr.io/ggml-org/llama.cpp:server
-    container_name: agent-memory-embedding
+    container_name: noldomem-embedding
     restart: unless-stopped
     ports:
       - "8090:8090"

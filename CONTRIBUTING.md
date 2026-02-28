@@ -5,8 +5,8 @@ Thanks for your interest in Agent Memory! Here's how to contribute.
 ## Quick Start
 
 ```bash
-git clone https://github.com/dorukardahan/asuman-memory.git
-cd asuman-memory
+git clone https://github.com/dorukardahan/noldo-memory.git
+cd noldo-memory
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Project rebranded from "asuman-memory" to "NoldoMem" (`noldo-memory`)
+- GitHub repo: dorukardahan/noldo-memory
+
 ## [1.0.0] - 2026-02-26
 
 Production-ready release with full monitoring, per-agent security, and 173 tests.
@@ -94,7 +100,7 @@ Production-ready release with full monitoring, per-agent security, and 173 tests
 
 ### Added
 - Per-agent database routing (multi-agent support)
-- Package rename: `asuman_memory` → `agent_memory`
+- Package rename: `noldo_memory` → `agent_memory`
 - Ebbinghaus strength decay with spaced repetition
 - Write-time semantic merge (deduplication)
 - Memory consolidation endpoint

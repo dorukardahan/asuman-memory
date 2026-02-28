@@ -1,4 +1,4 @@
-"""Trim asuman-memory export to top 100 high-value + 30 recent + top 50 entities."""
+"""Trim noldo-memory export to top 100 high-value + 30 recent + top 50 entities."""
 import os
 import sqlite3
 import time
