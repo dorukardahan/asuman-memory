@@ -41,3 +41,6 @@ LOG_DIR=$REPO/logs
 # ─── SQLite Backup (daily 7am) ─────────────────────────────────────────
 # Hot backup of all SQLite databases
 0 7 * * * mkdir -p $LOG_DIR && $REPO/scripts/backup_db.sh >> $LOG_DIR/backup.log 2>&1
+
+# Daily SQLite backup at 04:00
+0 4 * * * /opt/asuman/asuman-memory/scripts/backup_sqlite.sh >> /opt/asuman/asuman-memory/logs/backup.log 2>&1

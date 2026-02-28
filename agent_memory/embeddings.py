@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import struct
 import time
 from typing import TYPE_CHECKING, List, Optional
@@ -59,6 +60,11 @@ class OpenRouterEmbeddings:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+        # Optional bearer token for local embedding server
+        _embed_token = os.environ.get("EMBEDDING_SERVER_TOKEN", "")
+        if _embed_token:
+            self._headers["X-Embedding-Token"] = f"Bearer {_embed_token}"
 
         # Build an LRU cache keyed on text hash
         self._cache_size = cache_size

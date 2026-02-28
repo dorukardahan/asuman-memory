@@ -460,6 +460,7 @@ class StoreRequest(RequestModel):
     category: str = "other"
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     namespace: str = Field(default="default", description="Namespace for topic-based grouping")
+    source: Optional[str] = Field(default=None, description="Provenance label: api, hook, session_capture, import, auto_escalation")
     agent: Optional[str] = None
 
 
@@ -674,6 +675,8 @@ async def capture(req: CaptureRequest, request: Request) -> Dict[str, Any]:
             importance=float(it.get("importance", 0.5)),
             source_session=it.get("source_session"),
             memory_type=classify_memory_type(it["text"]),
+            source="session_capture",
+            trust_level="system",
         )
         if res.get("action") == "merged":
             merged_n += 1
@@ -733,6 +736,10 @@ async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
     from .ingest import classify_memory_type, sanitize_memory_text
     req.text = sanitize_memory_text(req.text)
 
+    # Provenance: use source from request if provided, default to 'api'
+    source = getattr(req, 'source', None) or 'api'
+    trust_level = 'system' if source in ('hook', 'auto_escalation') else 'user'
+
     res = storage.merge_or_store(
         text=req.text,
         vector=vector,
@@ -741,6 +748,8 @@ async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
         source_session=None,
         namespace=req.namespace,
         memory_type=classify_memory_type(req.text),
+        source=source,
+        trust_level=trust_level,
     )
 
     # Invalidate search cache
@@ -1411,6 +1420,56 @@ async def health_deep() -> Dict[str, Any]:
     }
 
 
+
+
+@app.get("/v1/metrics/lessons")
+async def lesson_metrics(request: Request, agent: str = "main"):
+    """Lesson effectiveness metrics."""
+    storage = _get_storage(agent, request=request)
+    conn = storage._get_conn()
+
+    total = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE memory_type='lesson'"
+    ).fetchone()[0]
+
+    active = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE memory_type='lesson' "
+        "AND COALESCE(lesson_status,'active')='active'"
+    ).fetchone()[0]
+
+    resolved = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE memory_type='lesson' "
+        "AND lesson_status='resolved'"
+    ).fetchone()[0]
+
+    by_tag = conn.execute(
+        "SELECT COALESCE(category, 'untagged') as tag, COUNT(*) as cnt "
+        "FROM memories WHERE memory_type='lesson' "
+        "GROUP BY category ORDER BY cnt DESC LIMIT 20"
+    ).fetchall()
+
+    import time as _time
+    week_ago = _time.time() - 7 * 86400
+    recent = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE memory_type='lesson' AND created_at > ?",
+        (week_ago,),
+    ).fetchone()[0]
+
+    avg_imp = conn.execute(
+        "SELECT AVG(importance) FROM memories WHERE memory_type='lesson'"
+    ).fetchone()[0]
+
+    return {
+        "agent": agent,
+        "total_lessons": total,
+        "active": active,
+        "resolved": resolved,
+        "recent_7d": recent,
+        "avg_importance": round(avg_imp or 0, 3),
+        "by_tag": [{"tag": r[0], "count": r[1]} for r in by_tag],
+    }
+
+
 @app.get("/v1/metrics/prometheus")
 async def metrics_prometheus() -> Any:
     """Prometheus text exposition format metrics."""
@@ -1581,6 +1640,8 @@ async def import_memories(req: ImportRequest, request: Request) -> Dict[str, Any
             category=mem.get("category", "other"),
             importance=float(mem.get("importance", 0.5)),
             source_session=mem.get("source_session"),
+            source="import",
+            trust_level="import",
             memory_id=mid,
         )
         imported += 1

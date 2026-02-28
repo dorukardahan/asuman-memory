@@ -240,6 +240,10 @@ class MemoryStorage:
         _add_col("memories", "lesson_status TEXT DEFAULT 'active'", "lesson_status")
         _add_col("memories", "lesson_scope TEXT", "lesson_scope")
         _add_col("memories", "resolved_at REAL", "resolved_at")
+        # Provenance tracking
+        _add_col("memories", "source TEXT DEFAULT 'api'", "source")
+        # Trust level: system, user, import
+        _add_col("memories", "trust_level TEXT DEFAULT 'user'", "trust_level")
 
         # Backfill last_accessed_at for existing rows (keep idempotent)
         try:
@@ -291,6 +295,8 @@ class MemoryStorage:
         namespace: str = "default",
         memory_id: Optional[str] = None,
         memory_type: str = "other",
+        source: str = "api",
+        trust_level: str = "user",
     ) -> str:
         """Insert a memory. Returns the memory ID."""
         conn = self._get_conn()
@@ -309,8 +315,8 @@ class MemoryStorage:
             """INSERT OR REPLACE INTO memories
                (id, text, category, memory_type, importance, source_session, namespace,
                 created_at, updated_at, vector_rowid,
-                strength, last_accessed_at, deleted_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                strength, last_accessed_at, deleted_at, source, trust_level)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
             (
                 mid,
                 text,
@@ -324,6 +330,8 @@ class MemoryStorage:
                 vector_rowid,
                 1.0,
                 now,
+                source,
+                trust_level,
             ),
         )
 
@@ -665,6 +673,8 @@ class MemoryStorage:
         similarity_threshold: float = 0.85,
         memory_type: str = "other",
         namespace: str = "default",
+        source: str = "api",
+        trust_level: str = "user",
     ) -> Dict[str, Any]:
         """Store a memory, merging into nearest neighbor when highly similar.
 
@@ -684,6 +694,8 @@ class MemoryStorage:
                 source_session=source_session,
                 memory_type=memory_type,
                 namespace=namespace,
+                source=source,
+                trust_level=trust_level,
             )
             return {"action": "inserted", "id": mid, "similarity": None}
 
@@ -696,6 +708,8 @@ class MemoryStorage:
                 source_session=source_session,
                 memory_type=memory_type,
                 namespace=namespace,
+                source=source,
+                trust_level=trust_level,
             )
             return {"action": "inserted", "id": mid, "similarity": None}
 
@@ -711,6 +725,8 @@ class MemoryStorage:
                 source_session=source_session,
                 memory_type=memory_type,
                 namespace=namespace,
+                source=source,
+                trust_level=trust_level,
             )
             return {"action": "inserted", "id": mid, "similarity": None}
 
@@ -723,6 +739,8 @@ class MemoryStorage:
                 source_session=source_session,
                 memory_type=memory_type,
                 namespace=namespace,
+                source=source,
+                trust_level=trust_level,
             )
             return {"action": "inserted", "id": mid, "similarity": None}
 
@@ -795,6 +813,8 @@ class MemoryStorage:
             source_session=source_session,
             memory_type=memory_type,
             namespace=namespace,
+            source=source,
+            trust_level=trust_level,
         )
         return {"action": "inserted", "id": mid, "similarity": similarity}
 

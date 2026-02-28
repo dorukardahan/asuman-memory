@@ -29,6 +29,9 @@ jobs:
       - name: Lint with ruff
         run: ruff check agent_memory/ tests/ scripts/
 
+      - name: Security audit
+        run: pip install pip-audit && pip-audit
+
       - name: Run tests
         env:
           OPENROUTER_API_KEY: test-key-for-ci
