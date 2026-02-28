@@ -1,27 +1,29 @@
 # NoldoMem
 
-> Long-term memory for AI agents. Named after the Noldor — Tolkien's elves renowned for deep knowledge and craft.
+> Long-term memory for [OpenClaw](https://github.com/openclaw/openclaw) AI agents. Named after the Noldor — Tolkien's elves renowned for deep knowledge and craft.
 
-NoldoMem gives your AI agents persistent memory that works like real memory: important things are remembered, trivial things fade, and mistakes become lasting lessons.
+NoldoMem replaces OpenClaw's built-in memory with a persistent, decay-aware memory system. Agents remember important things, forget trivial things over time, and learn from their mistakes — just like real memory.
 
-One SQLite file, no Docker required, no cloud DB.
+**Built for OpenClaw.** One SQLite file per agent, no cloud DB, no Docker required.
 
-## Features
+## Why NoldoMem?
 
-- **Ebbinghaus Decay** — Memories fade naturally over time, just like human memory
-- **Behavioral Reinforcement** — Agents learn from past mistakes via lesson memories
-- **Hybrid Search** — Semantic embeddings + BM25 keyword search for accurate recall
-- **Per-Agent Isolation** — Each agent gets its own memory database
-- **Memory Consolidation** — Old memories are compressed and merged automatically
-- **Trust & Provenance** — Track where every memory came from
-- **Pattern-to-Policy** — Repeated mistakes auto-escalate to behavioral rules
-- **Prompt Injection Protection** — Built-in sanitization prevents memory poisoning
-- **Two-Pass Reranking** — Fast primary + background quality reranker with async cache refresh
-- **Knowledge Graph** — Entity extraction, typed relations, temporal facts with conflict detection
-- **Turkish + English NLP** — Morphological analysis, temporal parsing, ASCII folding
-- **Resilient Embedding** — Batch fallback, 3-retry with exponential backoff, text truncation
+OpenClaw's native memory (`memorySearch`) is basic — keyword search, no decay, no behavioral learning. NoldoMem adds:
 
-## Quick Start
+| Feature | OpenClaw Native | NoldoMem |
+|---------|----------------|----------|
+| Search | Keyword only | Hybrid (semantic + BM25 + reranker) |
+| Memory decay | No | Ebbinghaus forgetting curve |
+| Learn from mistakes | No | Lesson memories with behavioral reinforcement |
+| Per-agent isolation | No | Separate SQLite per agent |
+| Memory consolidation | No | Auto-compress old memories |
+| Prompt injection protection | No | Built-in sanitization |
+| Trust/provenance tracking | No | Source + trust_level per memory |
+| Pattern-to-policy | No | 3+ same mistake auto-escalates to rule |
+
+## Quick Start (OpenClaw)
+
+### Step 1: Install NoldoMem
 
 ```bash
 git clone https://github.com/dorukardahan/noldo-memory.git
@@ -29,210 +31,242 @@ cd noldo-memory
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
 pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env: set OPENROUTER_API_KEY, AGENT_MEMORY_API_KEY
+# Edit .env: set AGENT_MEMORY_API_KEY (pick any strong secret)
+```
 
+### Step 2: Start the embedding server
+
+NoldoMem needs an embedding API (OpenAI-compatible `/v1/embeddings` format).
+
+**Auto-detect best setup for your hardware:**
+```bash
+./scripts/detect-hardware.sh          # shows recommendation
+./scripts/detect-hardware.sh --apply  # writes settings to .env
+```
+
+**Or pick manually:**
+
+| Profile | Model | RAM | Best For |
+|---------|-------|-----|----------|
+| minimal | EmbeddingGemma 300M | 1-2GB | Raspberry Pi, $5 VPS |
+| light | Qwen3-Embedding-0.6B | 2-4GB | Small VPS |
+| standard | Qwen3-Embedding-4B | 4-8GB | Mid-range server |
+| heavy | Qwen3-Embedding-8B | 12GB+ | Dedicated server |
+
+```bash
+# Local llama.cpp example (standard profile):
+llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
+  --embedding --pooling last --host 127.0.0.1 --port 8090
+
+# In .env:
+# OPENROUTER_BASE_URL=http://127.0.0.1:8090/v1
+# AGENT_MEMORY_DIMENSIONS=2560
+```
+
+**Or use a cloud API** (OpenRouter, OpenAI, etc.) — set `OPENROUTER_BASE_URL` and `OPENROUTER_API_KEY` in `.env`.
+
+### Step 3: Start NoldoMem
+
+```bash
 set -a; source .env; set +a
 python -m agent_memory
+# API starts on http://127.0.0.1:8787
 ```
 
-The API starts on `http://127.0.0.1:8787`.
+### Step 4: Configure OpenClaw
 
-## Embedding Server
+**4a. Disable OpenClaw's built-in memory** (important!):
 
-NoldoMem needs an embedding API compatible with the OpenAI `/v1/embeddings` format. Run locally (recommended) or use a cloud API.
-
-### Hardware auto-detection
-
-```bash
-./scripts/detect-hardware.sh          # show recommendation
-./scripts/detect-hardware.sh --json   # machine-readable output
-./scripts/detect-hardware.sh --apply  # write settings to .env
+```json
+{
+  "memorySearch": {
+    "enabled": false
+  }
+}
 ```
 
-### Model profiles
+**4b. Enable hooks:**
 
-| Profile | Model | Size | Dimensions | Min RAM | Use Case |
-|---------|-------|------|------------|---------|----------|
-| **minimal** | EmbeddingGemma 300M | 314MB | 768 | 1-2GB | Raspberry Pi, $5 VPS |
-| **light** | Qwen3-Embedding-0.6B | 610MB | 1024 | 2-4GB | Small VPS |
-| **standard** | Qwen3-Embedding-4B | 4.0GB | 2560 | 4-8GB | Mid-range server |
-| **heavy** | Qwen3-Embedding-8B | 8.1GB | 4096 | 12GB+ | Dedicated server |
-
-### Local setup
-
-```bash
-# Install llama.cpp, download model, then:
-llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
-  --embedding --pooling last --host 0.0.0.0 --port 8090 \
-  --ctx-size 8192 --batch-size 2048 --threads 12 --parallel 2
+```json
+{
+  "hooks": {
+    "internal": {
+      "enabled": true
+    }
+  }
+}
 ```
 
-Set `OPENROUTER_BASE_URL=http://127.0.0.1:8090/v1` and `AGENT_MEMORY_DIMENSIONS=2560` in `.env`.
-
-### Cloud API
+**4c. Install hooks:**
 
 ```bash
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_API_KEY=your-key
-AGENT_MEMORY_MODEL=openai/text-embedding-3-large
-AGENT_MEMORY_DIMENSIONS=3072
+HOOKS_DIR="$HOME/.openclaw/workspace/hooks"
+
+for hook in realtime-capture session-end-capture bootstrap-context \
+            after-tool-call pre-session-save post-compaction-restore \
+            subagent-complete; do
+  mkdir -p "$HOOKS_DIR/$hook"
+  cp "hooks/$hook/handler.js.example" "$HOOKS_DIR/$hook/handler.js"
+  cp "hooks/$hook/HOOK.md" "$HOOKS_DIR/$hook/HOOK.md" 2>/dev/null
+done
 ```
 
-### Dimension compatibility
-
-Changing embedding dimensions requires re-embedding all memories:
+**4d. Set the API key for hooks:**
 
 ```bash
-.venv/bin/python scripts/reindex_embeddings.py
-# Dry run: .venv/bin/python scripts/reindex_embeddings.py --dry-run
+mkdir -p ~/.noldomem
+echo "your-api-key-here" > ~/.noldomem/memory-api-key
+chmod 600 ~/.noldomem/memory-api-key
 ```
 
-## API
+**4e. Restart OpenClaw** to load the hooks.
+
+### Step 5: Verify
 
 ```bash
-# Store a memory
+curl -s localhost:8787/v1/health
+# {"status":"ok","checks":{"storage":true,"embedding":true}}
+
 curl -X POST localhost:8787/v1/store \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $API_KEY" \
-  -d '{"text": "User prefers dark mode", "agent": "main"}'
+  -H "Content-Type: application/json" -H "X-API-Key: YOUR_KEY" \
+  -d '{"text": "Test memory from setup", "agent": "main"}'
 
-# Recall memories
 curl -X POST localhost:8787/v1/recall \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $API_KEY" \
-  -d '{"query": "user preferences", "agent": "main", "limit": 5}'
+  -H "Content-Type: application/json" -H "X-API-Key: YOUR_KEY" \
+  -d '{"query": "test", "agent": "main", "limit": 5}'
 ```
 
-## API Endpoints
+## LLM Agent Integration
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/recall` | POST | Hybrid search (semantic + BM25 + recency + strength + importance) |
-| `/v1/capture` | POST | Batch ingest messages (auto memory_type classification) |
-| `/v1/store` | POST | Store a single memory |
-| `/v1/rule` | POST | Store a rule/instruction (importance=1.0) |
-| `/v1/forget` | DELETE | Delete by ID or query |
-| `/v1/search` | GET | Interactive search (CLI/debug) |
-| `/v1/pin` | POST | Pin a memory (protects from decay/gc/consolidation) |
-| `/v1/unpin` | POST | Unpin a memory |
-| `/v1/decay` | POST | Run Ebbinghaus strength decay |
-| `/v1/consolidate` | POST | Deduplicate + archive stale memories |
-| `/v1/compress` | POST | Summarize old long memories |
-| `/v1/gc` | POST | Permanently purge old soft-deleted memories |
-| `/v1/amnesia-check` | POST | Check memory coverage by topic list |
-| `/v1/stats` | GET | Database statistics |
-| `/v1/agents` | GET | List agent databases |
-| `/v1/health` | GET | Basic health check |
-| `/v1/health/deep` | GET | DB integrity, embedding probe, vectorless count, disk |
-| `/v1/metrics` | GET | Operational metrics (JSON) |
-| `/v1/metrics/prometheus` | GET | Prometheus text exposition format |
-| `/v1/admin/rotate-key` | POST | Rotate API key |
-| `/v1/export` | GET | Export memories as JSON |
-| `/v1/import` | POST | Import memories from JSON |
+**Put this in your agent's TOOLS.md or system prompt so the agent knows how to use NoldoMem:**
 
-All endpoints accept `?agent=<id>` for per-agent routing. Use `agent=all` for cross-agent operations.
+```markdown
+## Memory API (NoldoMem)
+
+You have access to a persistent memory system at localhost:8787.
+All requests need header: X-API-Key: <key>
+
+### Store a memory
+POST /v1/store {"text": "...", "agent": "YOUR_AGENT_ID"}
+- Auto-classified as: fact, preference, rule, conversation, or lesson
+
+### Recall memories
+POST /v1/recall {"query": "...", "agent": "YOUR_AGENT_ID", "limit": 5}
+- Returns relevant memories ranked by relevance + recency + importance
+- Filter by type: {"memory_type": "lesson"} for lessons only
+
+### Store a rule (max importance)
+POST /v1/rule {"text": "Always run tests before commit", "agent": "YOUR_AGENT_ID"}
+
+### What happens automatically (no action needed)
+- Old memories fade over time (Ebbinghaus decay) — use them or lose them
+- Lessons decay 3x slower than facts
+- Repeated mistakes (3+) become permanent rules
+- Your session starts with relevant memories pre-loaded (bootstrap hook)
+- Feedback you give ("wrong", "don't do that") is captured as lessons
+```
+
+## How Hooks Work
+
+NoldoMem connects to OpenClaw through 7 lifecycle hooks:
+
+| Hook | When | What It Does |
+|------|------|-------------|
+| **bootstrap-context** | Session start | Recalls relevant memories + lessons, injects into agent context |
+| **realtime-capture** | During chat | Detects feedback/corrections, stores as lessons |
+| **session-end-capture** | Session end | Detects unverified suggestions, auto-generates lessons |
+| **after-tool-call** | After tool use | Captures command outputs (allowlist-filtered) |
+| **pre-session-save** | Before save | Tags session with memory metadata |
+| **post-compaction-restore** | After compaction | Re-injects critical memories lost in context compaction |
+| **subagent-complete** | Sub-agent done | Captures sub-agent results |
+
+Each hook has a `HOOK.md` in [`hooks/`](./hooks/) explaining its behavior and configuration.
+
+## API Reference
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/v1/health` | GET | No | Health check |
+| `/v1/health/deep` | GET | Yes | DB integrity, embedding, disk |
+| `/v1/store` | POST | Yes | Store a memory |
+| `/v1/recall` | POST | Yes | Hybrid search |
+| `/v1/capture` | POST | Yes | Batch ingest (max 200 messages) |
+| `/v1/rule` | POST | Yes | Store rule (importance=1.0) |
+| `/v1/forget` | DELETE | Yes | Soft-delete |
+| `/v1/pin` | POST | Yes | Pin (protect from decay) |
+| `/v1/unpin` | POST | Yes | Unpin |
+| `/v1/decay` | POST | Yes | Run Ebbinghaus decay |
+| `/v1/consolidate` | POST | Yes | Deduplicate + archive |
+| `/v1/compress` | POST | Yes | Summarize old memories |
+| `/v1/gc` | POST | Yes | Purge soft-deleted |
+| `/v1/amnesia-check` | POST | Yes | Check memory coverage |
+| `/v1/stats` | GET | Yes | DB statistics |
+| `/v1/agents` | GET | Yes | List agent DBs |
+| `/v1/metrics` | GET | Yes | Operational metrics |
+| `/v1/metrics/lessons` | GET | Yes | Lesson effectiveness |
+| `/v1/export` | GET | Yes | Export as JSON |
+| `/v1/import` | POST | Yes | Import (max 500) |
+| `/v1/admin/rotate-key` | POST | Admin | Rotate API key |
+
+All endpoints accept `?agent=<id>` for per-agent routing.
 
 ## Search Architecture
 
-```text
-Query -> [Semantic (0.50)] -> sqlite-vec cosine
-      -> [Keyword  (0.25)] -> FTS5 BM25 trigram
-      -> [Recency  (0.10)] -> exp(-0.01 * days)
-      -> [Strength (0.07)] -> Ebbinghaus retention
-      -> [Importance(0.08)] -> write-time scoring
+```
+Query -> Semantic (0.50) -> sqlite-vec cosine KNN
+      -> Keyword  (0.25) -> FTS5 BM25
+      -> Recency  (0.10) -> exp(-0.01 * days)
+      -> Strength (0.07) -> Ebbinghaus retention
+      -> Importance(0.08) -> write-time score
       |
-      RRF fusion (k=60)
-      |
-      Primary reranker (MiniLM, top-10)
-      |
-      Background reranker (BGE-v2-m3, top-3, async cache update)
+      RRF fusion (k=60) -> Primary reranker (top-10) -> Background reranker (top-3)
+```
+
+## Production Deployment
+
+### systemd
+
+```bash
+sudo cp noldo-memory.service.example /etc/systemd/system/noldo-memory.service
+# Edit: paths, User, EnvironmentFile
+sudo systemctl enable --now noldo-memory
+```
+
+### Cron (recommended)
+
+See `crontab.example`. Key jobs: daily decay, weekly consolidation + GC, 6-hourly embedding backfill, daily SQLite backup.
+
+### Security checklist
+
+- [ ] `AGENT_MEMORY_HOST=127.0.0.1` (never 0.0.0.0)
+- [ ] API key file: permissions 600
+- [ ] Data directory: permissions 700
+- [ ] `memorySearch.enabled: false` in openclaw.json
+- [ ] `hooks.internal.enabled: true` in openclaw.json
+- [ ] Embedding server localhost only
+- [ ] Backup cron active
+
+### Docker
+
+```bash
+cp .env.example .env && mkdir -p models
+# Download embedding model into models/
+docker compose up -d
 ```
 
 ## Configuration
 
-All configuration is environment-driven. See `.env.example` for the full list.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENROUTER_API_KEY` | `""` | Embedding API key |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Embedding API base URL |
-| `AGENT_MEMORY_MODEL` | `qwen/qwen3-embedding-4b` | Embedding model name |
-| `AGENT_MEMORY_DIMENSIONS` | `2560` | Embedding dimensions |
-| `AGENT_MEMORY_DB` | `$HOME/.agent-memory/memory.sqlite` | SQLite path |
-| `AGENT_MEMORY_HOST` | `127.0.0.1` | API bind address |
-| `AGENT_MEMORY_PORT` | `8787` | API port |
-| `AGENT_MEMORY_API_KEY` | `""` | API authentication key |
-| `AGENT_MEMORY_RERANKER_ENABLED` | `true` | Enable cross-encoder reranker |
-| `AGENT_MEMORY_EMBED_WORKER_ENABLED` | `true` | Background embed worker |
-
-## Hooks
-
-OpenClaw hook examples for NoldoMem integration are in [`hooks/`](./hooks/):
-
-| Hook | Purpose |
-|------|---------|
-| `realtime-capture` | Capture messages in real-time |
-| `session-end-capture` | Batch capture on session end |
-| `bootstrap-context` | Inject recalled memories into context |
-| `after-tool-call` | Capture tool results |
-| `pre-session-save` | Tag sessions with memory metadata |
-| `post-compaction-restore` | Restore context after compaction |
-| `subagent-complete` | Capture sub-agent results |
-
-See [`hooks/README.md`](./hooks/README.md) for setup instructions.
-
-## Cron Jobs
-
-See `crontab.example` for recommended schedules (decay, consolidation, GC, backfill, backup).
-
-## Deployment
-
-### NoldoMem API service
-
-```bash
-sudo cp agent-memory.service.example /etc/systemd/system/agent-memory.service
-# Edit paths and EnvironmentFile
-sudo systemctl daemon-reload
-sudo systemctl enable --now agent-memory
-```
-
-### OpenClaw integration
-
-Disable built-in memory in `openclaw.json`:
-
-```json
-{ "memorySearch": { "enabled": false } }
-```
-
-### Production checklist
-
-- [ ] Strong secrets for `OPENROUTER_API_KEY`, `AGENT_MEMORY_API_KEY`
-- [ ] `AGENT_MEMORY_HOST=127.0.0.1` (localhost only)
-- [ ] Embedding server running (local or cloud)
-- [ ] Cron jobs installed
-- [ ] Hooks configured
-- [ ] SQLite backup scheduled
-
-## Docker
-
-```bash
-git clone https://github.com/dorukardahan/noldo-memory.git && cd noldo-memory
-cp .env.example .env
-mkdir -p models
-wget -P models https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/Qwen3-Embedding-4B-Q8_0.gguf
-docker compose up -d
-curl http://localhost:8787/v1/health
-```
+All config via environment variables. See [`.env.example`](./.env.example) for full list.
 
 ## Tests
 
 ```bash
 pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests/ -x -q
+python -m pytest tests/ -v   # 187 tests
+ruff check agent_memory/     # lint
 ```
 
 ## Contributing
