@@ -1,4 +1,8 @@
-# NoldoMem
+# NoldoMem — Long-Term Memory for OpenClaw AI Agents
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-187%20passing-brightgreen.svg)](.github/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 
 > Long-term memory for [OpenClaw](https://github.com/openclaw/openclaw) AI agents. Named after the Noldor — Tolkien's elves renowned for deep knowledge and craft.
 
@@ -20,10 +24,14 @@ OpenClaw's native memory (`memorySearch`) is basic — keyword search, no decay,
 | Prompt injection protection | No | Built-in sanitization |
 | Trust/provenance tracking | No | Source + trust_level per memory |
 | Pattern-to-policy | No | 3+ same mistake auto-escalates to rule |
+| Zero additional setup | Yes | No (requires embedding server) |
+| Cloud-managed option | Yes (built-in) | No (self-hosted only) |
 
 ## Quick Start (OpenClaw)
 
 ### Step 1: Install NoldoMem
+
+**Requirements:** Python 3.10+, ~200MB RAM for the API server (embedding server needs more — see Step 2).
 
 ```bash
 git clone https://github.com/dorukardahan/noldo-memory.git
@@ -56,6 +64,12 @@ NoldoMem needs an embedding API (OpenAI-compatible `/v1/embeddings` format).
 | standard | Qwen3-Embedding-4B | 4-8GB | Mid-range server |
 | heavy | Qwen3-Embedding-8B | 12GB+ | Dedicated server |
 
+**Download a model** (example: standard profile):
+```bash
+# Install llama.cpp: https://github.com/ggml-org/llama.cpp
+huggingface-cli download Qwen/Qwen3-Embedding-4B-GGUF Qwen3-Embedding-4B-Q8_0.gguf --local-dir models/
+```
+
 ```bash
 # Local llama.cpp example (standard profile):
 llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
@@ -74,6 +88,8 @@ llama-server --model Qwen3-Embedding-4B-Q8_0.gguf \
 set -a; source .env; set +a
 python -m agent_memory
 # API starts on http://127.0.0.1:8787
+# Data stored in: ~/.agent-memory/ (or ~/.noldomem/ or legacy ~/.asuman/)
+# Each agent gets its own SQLite file: memory.sqlite, memory-agent1.sqlite, etc.
 ```
 
 ### Step 4: Configure OpenClaw
@@ -147,7 +163,9 @@ curl -X POST localhost:8787/v1/recall \
 ## Memory API (NoldoMem)
 
 You have access to a persistent memory system at localhost:8787.
-All requests need header: X-API-Key: <key>
+All requests need headers:
+- Content-Type: application/json
+- X-API-Key: <key> (read from ~/.noldomem/memory-api-key)
 
 ### Store a memory
 POST /v1/store {"text": "...", "agent": "YOUR_AGENT_ID"}
@@ -184,6 +202,33 @@ NoldoMem connects to OpenClaw through 7 lifecycle hooks:
 | **subagent-complete** | Sub-agent done | Captures sub-agent results |
 
 Each hook has a `HOOK.md` in [`hooks/`](./hooks/) explaining its behavior and configuration.
+
+## Architecture
+
+```mermaid
+graph TD
+    A[OpenClaw Agent] <-->|lifecycle events| B(Hooks)
+    B -->|store/recall HTTP| C{NoldoMem API :8787}
+    C -->|read/write| D[(SQLite per agent)]
+    C -->|embed text| E{Embedding Server :8090}
+    B -->|bootstrap-context| A
+    B -->|realtime-capture| C
+    B -->|session-end-capture| C
+```
+
+```
+Agent Session
+    |
+    +-- bootstrap-context hook -----> NoldoMem /v1/recall --> inject memories into context
+    |
+    +-- [conversation happens] -----> realtime-capture hook --> /v1/store (lessons)
+    |
+    +-- [tool calls] ---------------> after-tool-call hook --> /v1/store (outputs)
+    |
+    +-- session-end-capture hook ---> /v1/store (unverified suggestions as lessons)
+    |
+    +-- pre-session-save hook ------> tag session metadata
+```
 
 ## API Reference
 
@@ -267,6 +312,29 @@ All config via environment variables. See [`.env.example`](./.env.example) for f
 pip install -r requirements-dev.txt
 python -m pytest tests/ -v   # 187 tests
 ruff check agent_memory/     # lint
+```
+
+## Troubleshooting
+
+| Problem | Cause & Fix |
+|---------|-------------|
+| `curl` returns "Unauthorized" | Wrong API key. Check `~/.noldomem/memory-api-key` matches `AGENT_MEMORY_API_KEY` in `.env` |
+| `/v1/health` shows `"embedding": false` | Embedding server not running or wrong URL. Check `OPENROUTER_BASE_URL` in `.env` |
+| Agent doesn't remember anything | Hooks not loading. Verify `hooks.internal.enabled: true` in `openclaw.json` and restart OpenClaw |
+| `vector dimension mismatch` error | Changed embedding model without reindexing. Run `.venv/bin/python scripts/reindex_embeddings.py` |
+| Port 8787 already in use | Set `AGENT_MEMORY_PORT=8788` (or any free port) in `.env` |
+| Memories disappearing too fast | Decay is too aggressive. Adjust decay cron frequency in crontab, or pin critical memories via `/v1/pin` |
+| `sqlite3.OperationalError: database is locked` | Concurrent writes. NoldoMem handles this with WAL mode, but check for external tools accessing the DB |
+
+## Upgrading
+
+```bash
+cd /path/to/noldo-memory
+git pull origin main
+.venv/bin/pip install -r requirements.txt
+# Compare .env.example with your .env for new variables
+# Database migrations run automatically on startup
+sudo systemctl restart noldo-memory
 ```
 
 ## Contributing
