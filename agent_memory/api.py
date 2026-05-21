@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 _storage_pool: Optional[StoragePool] = None
 _embedder: Optional[OpenRouterEmbeddings] = None
 _embed_worker: Optional[EmbedWorker] = None
+_warmup_task: Optional[asyncio.Task[None]] = None
 _config: Optional[Config] = None
 _start_time: float = 0.0
 
@@ -186,7 +187,7 @@ def _get_kg(agent: Optional[str] = None) -> KnowledgeGraph:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic."""
-    global _storage_pool, _embedder, _embed_worker, _config, _start_time, _search_weights, _reranker, _bg_reranker
+    global _storage_pool, _embedder, _embed_worker, _warmup_task, _config, _start_time, _search_weights, _reranker, _bg_reranker
 
     _config = load_config()
     errors = _config.validate()
@@ -343,11 +344,22 @@ async def lifespan(app: FastAPI):
     )
 
     # Start warmup background task
-    asyncio.create_task(warmup_loop())
+    _warmup_task = asyncio.create_task(warmup_loop(), name="embedding-warmup")
 
     yield
 
     # Shutdown
+    if _warmup_task is not None:
+        _warmup_task.cancel()
+        try:
+            await _warmup_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("Warmup task shutdown error: %s", exc)
+        finally:
+            _warmup_task = None
+
     if _embed_worker is not None:
         try:
             await _embed_worker.stop()

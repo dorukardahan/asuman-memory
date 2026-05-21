@@ -17,7 +17,7 @@ vector_rowid is intentionally set to NULL — vectors must be
 re-embedded via backfill_vectors.py after migration because
 vector rowids are DB-local and cannot be copied across DBs.
 
-Adds source_session prefix '[migrated-from:{agent}]' for traceability.
+Adds source_session prefix '[migrated-from:{agent}:{source_id}]' for traceability.
 Does NOT delete source DBs. Idempotent (skips already-migrated rows).
 Atomic per source DB (rollback on any error).
 """
@@ -98,23 +98,29 @@ def migrate(src_agent: str, dst_agent: str, dry_run: bool = False) -> int:
     dst.execute("PRAGMA journal_mode=WAL")
     dst.execute("PRAGMA busy_timeout = 5000")
 
-    # Idempotency: check which source IDs are already migrated (per-row, not per-DB)
-    migrated_tag = f"[migrated-from:{src_agent}]"
+    # Idempotency: key migrated rows by source row id, not just source session.
+    migrated_prefix = f"[migrated-from:{src_agent}:"
+    legacy_tag = f"[migrated-from:{src_agent}]"
     existing_count = dst.execute(
         "SELECT COUNT(*) FROM memories WHERE source_session LIKE ?",
-        (f"{migrated_tag}%",),
+        (f"{migrated_prefix}%",),
     ).fetchone()[0]
 
     # Build set of source IDs already in destination for per-row skip
+    existing_source_ids = set()
+    legacy_sessions = set()
     if existing_count > 0:
-        existing_sessions = set()
         for r in dst.execute(
             "SELECT source_session FROM memories WHERE source_session LIKE ?",
-            (f"{migrated_tag}%",),
+            (f"{migrated_prefix}%",),
         ).fetchall():
-            existing_sessions.add(r[0])
-    else:
-        existing_sessions = set()
+            marker = (r[0] or "").split("]", 1)[0]
+            existing_source_ids.add(marker.removeprefix(migrated_prefix).rstrip("]"))
+    for r in dst.execute(
+        "SELECT source_session FROM memories WHERE source_session LIKE ?",
+        (f"{legacy_tag}%",),
+    ).fetchall():
+        legacy_sessions.add(r[0])
 
     # Detect source schema once
     sample_keys = rows[0].keys() if rows else []
@@ -126,12 +132,14 @@ def migrate(src_agent: str, dst_agent: str, dry_run: bool = False) -> int:
     try:
         for row in rows:
             row_keys = row.keys() if not sample_keys else sample_keys
+            source_id = row["id"] if "id" in row_keys else ""
             orig_ss = row["source_session"] if "source_session" in row_keys else ""
             orig_ss = orig_ss or ""
-            source_session = f"{migrated_tag} {orig_ss}".rstrip()
+            source_marker = f"{migrated_prefix}{source_id}]"
+            source_session = f"{source_marker} {orig_ss}".rstrip()
 
-            # Per-row idempotency: skip if this exact source_session already exists
-            if source_session in existing_sessions:
+            # Per-row idempotency: skip only this source row.
+            if source_id in existing_source_ids or (not source_id and f"{legacy_tag} {orig_ss}".rstrip() in legacy_sessions):
                 skipped += 1
                 continue
 
@@ -174,6 +182,8 @@ def migrate(src_agent: str, dst_agent: str, dry_run: bool = False) -> int:
                 (new_id, row["text"]),
             )
             migrated += 1
+            if source_id:
+                existing_source_ids.add(source_id)
 
         dst.commit()
     except Exception as e:

@@ -81,6 +81,7 @@ lines.append("|--------|------|----------|")
 for row in top_entities:
     lines.append(f"| {row['name']} | {row['type'] or '?'} | {row['mention_count']} |")
 
+OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 OUTPUT.write_text("\n".join(lines), encoding="utf-8")
 conn.close()
 print(f"Trimmed: {len(high_value)} high-value, {len(recent_user)} recent, {len(top_entities)} entities")

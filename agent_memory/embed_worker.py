@@ -249,7 +249,13 @@ class EmbedWorker:
             vector_rowid = cur.lastrowid
 
             updated = conn.execute(
-                "UPDATE memories SET vector_rowid = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                """
+                UPDATE memories
+                   SET vector_rowid = ?, updated_at = ?
+                 WHERE id = ?
+                   AND vector_rowid IS NULL
+                   AND deleted_at IS NULL
+                """,
                 (vector_rowid, time.time(), memory_id),
             )
             if int(updated.rowcount or 0) < 1:

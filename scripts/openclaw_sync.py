@@ -164,124 +164,133 @@ async def sync(args: argparse.Namespace) -> Dict[str, Any]:
     total_skipped = 0
     errors = 0
     processed_agents = 0
+    state_changed = False
 
-    for agent_id, sessions in agent_sessions.items():
-        # Find new/modified sessions for this agent
-        modified = _get_modified_sessions(sessions, state, full=args.full, agent_id=agent_id)
-        if not modified:
-            continue
-
-        logger.info("Agent [%s]: Found %d new/modified session(s)", agent_id, len(modified))
-        processed_agents += 1
-        storage = pool.get(agent_id)
-        kg = KnowledgeGraph(storage=storage)
-
-        for session_path in modified:
-            sid = session_path.stem
-            # Prefix sid with agent_id in state to avoid collision across agents if needed
-            # but stem is usually unique UUID. For safety, we track by absolute path/stem.
-            state_key = f"{agent_id}:{sid}" if agent_id != "main" else sid
-
-            try:
-                chunks = parse_session_file(session_path, gap_hours=cfg.chunk_gap_hours)
-            except Exception as exc:
-                logger.warning("Failed to parse %s/%s: %s", agent_id, sid[:8], exc)
-                errors += 1
+    try:
+        for agent_id, sessions in agent_sessions.items():
+            # Find new/modified sessions for this agent
+            modified = _get_modified_sessions(sessions, state, full=args.full, agent_id=agent_id)
+            if not modified:
                 continue
 
-            # Filter out already-stored chunks (batch SELECT)
-            chunk_ids = [c.md5 for c in chunks]
-            existing_ids: set[str] = set()
-            if chunk_ids:
-                conn = storage._get_conn()
-                placeholders = ",".join(["?"] * len(chunk_ids))
-                rows = conn.execute(
-                    f"SELECT id FROM memories WHERE id IN ({placeholders})",
-                    chunk_ids,
-                ).fetchall()
-                existing_ids = {r["id"] for r in rows}
+            logger.info("Agent [%s]: Found %d new/modified session(s)", agent_id, len(modified))
+            processed_agents += 1
+            storage = pool.get(agent_id)
+            kg = KnowledgeGraph(storage=storage)
 
-            new_chunks = [c for c in chunks if c.md5 not in existing_ids]
-            skipped = len(chunks) - len(new_chunks)
-            total_skipped += skipped
+            for session_path in modified:
+                sid = session_path.stem
+                # Prefix sid with agent_id in state to avoid collision across agents if needed
+                # but stem is usually unique UUID. For safety, we track by absolute path/stem.
+                state_key = f"{agent_id}:{sid}" if agent_id != "main" else sid
 
-            if not new_chunks:
+                try:
+                    chunks = parse_session_file(session_path, gap_hours=cfg.chunk_gap_hours)
+                except Exception as exc:
+                    logger.warning("Failed to parse %s/%s: %s", agent_id, sid[:8], exc)
+                    errors += 1
+                    continue
+
+                # Filter out already-stored chunks (batch SELECT)
+                chunk_ids = [c.md5 for c in chunks]
+                existing_ids: set[str] = set()
+                if chunk_ids:
+                    conn = storage._get_conn()
+                    placeholders = ",".join(["?"] * len(chunk_ids))
+                    rows = conn.execute(
+                        f"SELECT id FROM memories WHERE id IN ({placeholders})",
+                        chunk_ids,
+                    ).fetchall()
+                    existing_ids = {r["id"] for r in rows}
+
+                new_chunks = [c for c in chunks if c.md5 not in existing_ids]
+                skipped = len(chunks) - len(new_chunks)
+                total_skipped += skipped
+
+                if not new_chunks:
+                    state.setdefault("sessions_synced", {})[state_key] = {
+                        "mtime": session_path.stat().st_mtime,
+                        "chunks": len(chunks),
+                        "agent": agent_id,
+                    }
+                    state_changed = True
+                    continue
+
+                # Embed and store
+                texts = [c.text for c in new_chunks]
+                vectors = [None] * len(new_chunks)
+
+                if embedder and texts:
+                    try:
+                        vectors = await embedder.embed_batch_resilient(
+                            texts, max_sub_batch=_sync_embed_sub_batch()
+                        )
+                    except Exception as exc:
+                        logger.warning("Embedding failed for %s/%s: %s", agent_id, sid[:8], exc)
+
+                items = []
+                for chunk, vector in zip(new_chunks, vectors):
+                    importance = score_importance(chunk.text, {"role": chunk.role})
+                    items.append({
+                        "id": chunk.md5,
+                        "text": chunk.text,
+                        "vector": vector,
+                        "category": chunk.role,
+                        "importance": importance,
+                        "source_session": chunk.session_id,
+                    })
+
+                try:
+                    ids = storage.store_memories_batch(items)
+                    total_stored += len(ids)
+                except Exception as exc:
+                    logger.error("Storage failed for %s/%s: %s", agent_id, sid[:8], exc)
+                    errors += 1
+                    continue
+
+                # Knowledge graph
+                for chunk in new_chunks:
+                    try:
+                        kg.process_text(chunk.text, source=sid, timestamp=chunk.timestamp)
+                    except Exception:
+                        pass
+
+                total_chunks += len(chunks)
+
+                # Update state (multi-agent aware)
                 state.setdefault("sessions_synced", {})[state_key] = {
                     "mtime": session_path.stat().st_mtime,
                     "chunks": len(chunks),
-                    "agent": agent_id
+                    "agent": agent_id,
                 }
-                continue
+                state_changed = True
+                logger.info("  %s/%s: %d new chunks stored", agent_id, sid[:8], len(new_chunks))
 
-            # Embed and store
-            texts = [c.text for c in new_chunks]
-            vectors = [None] * len(new_chunks)
+        if total_stored == 0 and errors == 0:
+            if state_changed:
+                state["last_sync"] = datetime.now().isoformat()
+                state["sync_count"] = state.get("sync_count", 0) + 1
+                _save_state(state)
+            return {"status": "up_to_date", "new": 0, "stored": 0}
 
-            if embedder and texts:
-                try:
-                    vectors = await embedder.embed_batch_resilient(
-                        texts, max_sub_batch=_sync_embed_sub_batch()
-                    )
-                except Exception as exc:
-                    logger.warning("Embedding failed for %s/%s: %s", agent_id, sid[:8], exc)
+        # Update state metadata
+        state["last_sync"] = datetime.now().isoformat()
+        state["total_synced"] = state.get("total_synced", 0) + total_stored
+        state["sync_count"] = state.get("sync_count", 0) + 1
+        _save_state(state)
 
-            items = []
-            for chunk, vector in zip(new_chunks, vectors):
-                importance = score_importance(chunk.text, {"role": chunk.role})
-                items.append({
-                    "id": chunk.md5,
-                    "text": chunk.text,
-                    "vector": vector,
-                    "category": chunk.role,
-                    "importance": importance,
-                    "source_session": chunk.session_id,
-                })
+        stats = {
+            "status": "ok",
+            "agents_processed": processed_agents,
+            "chunks_parsed": total_chunks,
+            "new_stored": total_stored,
+            "skipped_existing": total_skipped,
+            "errors": errors,
+        }
 
-            try:
-                ids = storage.store_memories_batch(items)
-                total_stored += len(ids)
-            except Exception as exc:
-                logger.error("Storage failed for %s/%s: %s", agent_id, sid[:8], exc)
-                errors += 1
-                continue
-
-            # Knowledge graph
-            for chunk in new_chunks:
-                try:
-                    kg.process_text(chunk.text, source=sid, timestamp=chunk.timestamp)
-                except Exception:
-                    pass
-
-            total_chunks += len(chunks)
-
-            # Update state (multi-agent aware)
-            state.setdefault("sessions_synced", {})[state_key] = {
-                "mtime": session_path.stat().st_mtime,
-                "chunks": len(chunks),
-                "agent": agent_id
-            }
-            logger.info("  %s/%s: %d new chunks stored", agent_id, sid[:8], len(new_chunks))
-
-    if total_stored == 0 and errors == 0:
-        return {"status": "up_to_date", "new": 0, "stored": 0}
-
-    # Update state metadata
-    state["last_sync"] = datetime.now().isoformat()
-    state["total_synced"] = state.get("total_synced", 0) + total_stored
-    state["sync_count"] = state.get("sync_count", 0) + 1
-    _save_state(state)
-
-    stats = {
-        "status": "ok",
-        "agents_processed": processed_agents,
-        "chunks_parsed": total_chunks,
-        "new_stored": total_stored,
-        "skipped_existing": total_skipped,
-        "errors": errors,
-    }
-
-    pool.close_all()
-    return stats
+        return stats
+    finally:
+        pool.close_all()
 
 
 def show_status() -> None:

@@ -6,10 +6,9 @@ Safe for profile changes (e.g. switching from 0.6B to 4B).
 
 Steps:
 1. Read all memories from SQLite
-2. Drop old memory_vectors table
-3. Create new table with configured dimensions
-4. Re-embed each memory via the configured embedding endpoint
-5. Update vector_rowid references
+2. Re-embed each memory via the configured embedding endpoint
+3. Replace memory_vectors only after all replacement vectors are ready
+4. Update vector_rowid references
 
 Usage:
   # Uses settings from .env / environment:
@@ -77,6 +76,44 @@ def float_list_to_blob(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
+def prepare_reindexed_vectors(
+    rows: list[tuple[str, str, int | None]],
+    batch_size: int,
+    sleep_between: float,
+) -> list[tuple[str, bytes]]:
+    """Embed all rows before touching the live vector table."""
+    prepared: list[tuple[str, bytes]] = []
+    total = len(rows)
+    start_time = time.time()
+
+    for i in range(0, total, batch_size):
+        batch = rows[i:i + batch_size]
+        texts = [row[1][:MAX_CHARS] for row in batch]
+
+        try:
+            vectors = embed_batch(texts)
+        except Exception as e:
+            raise RuntimeError(f"batch {i}-{i+len(batch)} failed: {e}") from e
+
+        if len(vectors) != len(batch):
+            raise RuntimeError(f"batch {i}-{i+len(batch)} returned {len(vectors)} vectors for {len(batch)} texts")
+
+        for (mem_id, _content, _old_rowid), vec in zip(batch, vectors):
+            if len(vec) != EMBED_DIM:
+                raise RuntimeError(f"memory {mem_id} returned {len(vec)} dims; expected {EMBED_DIM}")
+            prepared.append((mem_id, float_list_to_blob(vec)))
+
+        elapsed = time.time() - start_time
+        rate = len(prepared) / elapsed if elapsed > 0 else 0
+        eta = (total - len(prepared)) / rate if rate > 0 else 0
+        print(f"  [{len(prepared)}/{total}] {rate:.1f} mem/s, ETA: {eta:.0f}s")
+
+        if i + batch_size < total:
+            time.sleep(sleep_between)
+
+    return prepared
+
+
 def main():
     parser = argparse.ArgumentParser(description="Re-embed all memories with current config")
     parser.add_argument("--dry-run", action="store_true", help="Show plan without executing")
@@ -135,35 +172,27 @@ def main():
         print(f"ERROR: Cannot reach embedding endpoint: {e}")
         sys.exit(1)
 
-    # 3. Drop old vector table and recreate
-    print(f"Recreating memory_vectors with float[{EMBED_DIM}]...")
-    conn.execute("DROP TABLE IF EXISTS memory_vectors")
-    conn.execute(f"""
-        CREATE VIRTUAL TABLE memory_vectors USING vec0(
-            embedding float[{EMBED_DIM}]
-        )
-    """)
-    conn.commit()
-
-    # 4. Re-embed in batches
+    # 3. Re-embed in batches before touching the live vector table.
     total = len(rows)
-    done = 0
-    errors = 0
     start_time = time.time()
+    try:
+        prepared = prepare_reindexed_vectors(rows, args.batch_size, args.sleep)
+    except Exception as e:
+        print(f"ERROR: Reindex aborted before modifying live vectors: {e}")
+        conn.close()
+        sys.exit(1)
 
-    for i in range(0, total, args.batch_size):
-        batch = rows[i:i + args.batch_size]
-        texts = [row[1][:MAX_CHARS] for row in batch]
-
-        try:
-            vectors = embed_batch(texts)
-        except Exception as e:
-            print(f"  ERROR batch {i}-{i+len(batch)}: {e}")
-            errors += len(batch)
-            continue
-
-        for (mem_id, _content, _old_rowid), vec in zip(batch, vectors):
-            blob = float_list_to_blob(vec)
+    # 4. Replace vector table and memory references in one transaction.
+    print(f"Recreating memory_vectors with float[{EMBED_DIM}]...")
+    try:
+        conn.execute("BEGIN")
+        conn.execute("DROP TABLE IF EXISTS memory_vectors")
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE memory_vectors USING vec0(
+                embedding float[{EMBED_DIM}]
+            )
+        """)
+        for mem_id, blob in prepared:
             cursor = conn.execute(
                 "INSERT INTO memory_vectors(embedding) VALUES (?)",
                 (blob,),
@@ -173,21 +202,17 @@ def main():
                 "UPDATE memories SET vector_rowid = ? WHERE id = ?",
                 (new_rowid, mem_id),
             )
-
         conn.commit()
-        done += len(batch)
-        elapsed = time.time() - start_time
-        rate = done / elapsed if elapsed > 0 else 0
-        eta = (total - done) / rate if rate > 0 else 0
-        print(f"  [{done}/{total}] {rate:.1f} mem/s, ETA: {eta:.0f}s")
-
-        if i + args.batch_size < total:
-            time.sleep(args.sleep)
+    except Exception as e:
+        conn.rollback()
+        print(f"ERROR: Reindex swap failed and was rolled back: {e}")
+        conn.close()
+        sys.exit(1)
 
     elapsed = time.time() - start_time
-    print(f"\nDone! Re-embedded {done}/{total} memories in {elapsed:.1f}s ({errors} errors)")
-    if done > 0:
-        print(f"Average: {elapsed/done*1000:.1f}ms per memory")
+    print(f"\nDone! Re-embedded {len(prepared)}/{total} memories in {elapsed:.1f}s (0 errors)")
+    if prepared:
+        print(f"Average: {elapsed/len(prepared)*1000:.1f}ms per memory")
 
     # 5. Verify
     vec_count = conn.execute(

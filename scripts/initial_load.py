@@ -214,10 +214,14 @@ async def main() -> None:
             stored += len(ids)
         except Exception as exc:
             logger.error("Storage batch failed: %s", exc)
+            ids = []
 
         # Knowledge graph
         if kg:
+            stored_ids = set(ids)
             for chunk in batch:
+                if chunk.md5 not in stored_ids:
+                    continue
                 try:
                     kg.process_text(
                         chunk.text,
