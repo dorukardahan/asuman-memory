@@ -26,8 +26,10 @@ jobs:
           pip install -r requirements-dev.txt
           pip install ruff
 
-      - name: Lint with ruff
-        run: ruff check agent_memory/ tests/ scripts/
+      - name: Run unified audit
+        env:
+          OPENROUTER_API_KEY: test-key-for-ci
+        run: bash scripts/audit.sh --ci
 
       - name: Security audit
         run: |
@@ -35,8 +37,3 @@ jobs:
           # nltk 3.9.3 is latest available; CVEs have no fix version yet (transitive dep of zeyrek)
           # pip 26.0.1 is GitHub runner tooling; CVE-2026-3219 currently reports no fixed version.
           pip-audit --ignore-vuln GHSA-rf74-v2fm-23pw --ignore-vuln CVE-2026-33230 --ignore-vuln CVE-2026-33231 --ignore-vuln CVE-2026-3219
-
-      - name: Run tests
-        env:
-          OPENROUTER_API_KEY: test-key-for-ci
-        run: python -m pytest tests/ -v --tb=short
