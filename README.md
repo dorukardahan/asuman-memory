@@ -100,9 +100,9 @@ AGENT_MEMORY_RERANKER_API_LOCAL_FALLBACK=false
 ```
 
 When the hosted reranker is available, NoldoMem skips local reranker prewarm and
-two-pass background reranking. If the key or endpoint is missing, it falls back
-to the local cross-encoder path at startup. If the hosted call fails at runtime,
-NoldoMem uses fast lexical fallback unless
+two-pass background reranking. If the key or endpoint is missing, it tries the
+optional local cross-encoder path at startup when `sentence-transformers` is
+installed. If the hosted call fails at runtime, NoldoMem uses fast lexical fallback unless
 `AGENT_MEMORY_RERANKER_API_LOCAL_FALLBACK=true` is set. Cross-agent
 `agent=all` recall reranks once after merging agent results instead of calling
 the hosted reranker once per agent database.
@@ -405,7 +405,9 @@ Query -> Semantic (0.50) -> sqlite-vec cosine KNN
 
 Reranking has two modes:
 
-- Local cross-encoder: default, uses `sentence-transformers` models.
+- Local cross-encoder: optional, uses `sentence-transformers` models. Install
+  it with `pip install ".[reranker]"` for source installs or
+  `pip install "sentence-transformers>=3.0.0"` for manual environments.
 - API reranker: set `AGENT_MEMORY_RERANKER_API_ENABLED=true` and provide
   `AGENT_MEMORY_RERANKER_API_KEY` or `AGENT_MEMORY_RERANKER_API_KEY_FILE`.
   API reranking handles the primary pass and can fall back to the local

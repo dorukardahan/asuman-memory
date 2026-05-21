@@ -7,5 +7,7 @@ fastapi>=0.109.0
 uvicorn>=0.27.0
 pydantic>=2.0.0
 rapidfuzz>=3.0.0
-# Reranker (optional — install for cross-encoder reranking)
-sentence-transformers>=3.0.0
+# Optional local cross-encoder reranking:
+#   pip install ".[reranker]"
+# or:
+#   pip install "sentence-transformers>=3.0.0"
