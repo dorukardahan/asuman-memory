@@ -38,7 +38,7 @@ Then enable it in `openclaw.json`:
           "timeoutMs": 5000,
           "timeouts": {
             "after_tool_call": 3000,
-            "before_compaction": 10000,
+            "before_compaction": 30000,
             "subagent_ended": 3000
           }
         },
@@ -58,8 +58,10 @@ Then enable it in `openclaw.json`:
 ```
 
 `hooks.timeoutMs` and `hooks.timeouts` are supported by OpenClaw 2026.5.3+.
-They bound optional lifecycle hooks without changing explicit
-`noldomem_recall`, `noldomem_store`, or `noldomem_pin` tool calls.
+On OpenClaw 2026.5.20+, keep `before_compaction` at the host's 30 second
+default so NoldoMem's bounded capture request has room to finish. These
+timeouts do not change explicit `noldomem_recall`, `noldomem_store`, or
+`noldomem_pin` tool calls.
 
 Restart OpenClaw after installing.
 

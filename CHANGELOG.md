@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.27.12] - 2026-05-22
+
+### Changed
+- Align recommended OpenClaw compaction hook timeout settings with OpenClaw 2026.5.20's 30 second before/after compaction default, leaving enough room for NoldoMem's bounded capture request.
+
 ## [1.27.11] - 2026-05-17
 
 ### Fixed

@@ -187,8 +187,10 @@ and bootstrap context injection. The package declares its runtime entrypoint for
 the OpenClaw 2026.5.2+ plugin installer path. See
 [`plugin/README.md`](./plugin/README.md).
 
-For OpenClaw 2026.5.3+, set hook timeouts on the plugin entry so optional
-lifecycle capture cannot delay the gateway if the memory API is slow:
+For OpenClaw 2026.5.20+, keep compaction capture at the host's 30 second
+default so NoldoMem's bounded capture request has room to finish without
+stalling the gateway. Shorter optional lifecycle hooks can still use tighter
+timeouts:
 
 ```json
 {
@@ -200,7 +202,7 @@ lifecycle capture cannot delay the gateway if the memory API is slow:
           "timeoutMs": 5000,
           "timeouts": {
             "after_tool_call": 3000,
-            "before_compaction": 10000,
+            "before_compaction": 30000,
             "subagent_ended": 3000
           }
         }

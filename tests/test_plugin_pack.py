@@ -55,6 +55,19 @@ def test_native_plugin_registers_current_openclaw_typed_hooks():
     assert 'api.on("subagent_ended"' in hooks_source
 
 
+def test_docs_keep_compaction_capture_on_openclaw_520_timeout_default():
+    repo_root = Path(__file__).resolve().parent.parent
+    root_readme = (repo_root / "README.md").read_text()
+    plugin_readme = (repo_root / "plugin" / "README.md").read_text()
+
+    for text in (root_readme, plugin_readme):
+        assert '"before_compaction": 30000' in text
+        assert ('"before_compaction": ' + '10000') not in text
+
+    assert "OpenClaw 2026.5.20" in root_readme
+    assert "OpenClaw 2026.5.20" in plugin_readme
+
+
 def test_plugin_pin_uses_public_pin_api_id_contract():
     repo_root = Path(__file__).resolve().parent.parent
     tools_source = (repo_root / "plugin" / "src" / "tools.js").read_text()
