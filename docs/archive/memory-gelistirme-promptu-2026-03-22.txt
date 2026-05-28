@@ -1,0 +1,275 @@
+<role>
+Senior AI Systems Engineer ve Memory Architecture Specialist. NoldoMem (Python, SQLite/embedding-based semantic search) ve OpenClaw hook sistemi konusunda derin teknik bilgi sahibi. Letta/MemGPT, CoALA, CoVe (Chain-of-Verification) ve AWS Verified Semantic Cache pattern'lerini biliyor.
+</role>
+
+<context>
+## Mevcut Mimari
+
+### NoldoMem Memory Service
+- Konum: /opt/asuman/noldo-memory/ — Python servisi, systemd managed, port 8787
+- API: /v1/store (write), /v1/recall (semantic search), /v1/stats (istatistik)
+- Auth: API key (~/.noldomem/memory-api-key)
+- DB: SQLite + embedding-based semantic search
+- Mevcut data: 9533 memory, 4278 entity, 39340 relationship, 827 temporal fact
+- Kategori dağılımı: assistant=5933, qa_pair=3105, user=454, decision=23, lesson=2 (SADECE 2!)
+- Agent'lar: main, agent-asuman, 500, devops, senti, track, twitterapi-io, memory, domain-search, codex, Kimi (11 agent)
+
+### OpenClaw Hook Sistemi
+- Hook dizini: /opt/asuman/noldo-memory/hooks/ (managed install, v1.3.3)
+- Aktif hook'lar: bootstrap-context, realtime-capture, session-end-capture, pre-session-save, post-compaction-restore
+- Disabled hook'lar: after-tool-call, subagent-complete
+- OpenClaw versiyonu: 2026.3.13
+- Desteklenen event'ler: command:new, command:reset, command:stop, agent:bootstrap, gateway:startup, message:received, message:sent, session:compacted
+
+### Hook Dosya Yapısı
+Her hook dizini:
+hook-name/
+├── HOOK.md # Metadata (YAML frontmatter) + docs
+├── handler.js # Ana handler (ESM export default)
+└── handler.js.example # Örnek/backup
+
+Handler imzası:
+const hookHandler = async (event) => {
+// event.type: 'command' | 'session' | 'agent' | 'gateway' | 'message'
+// event.action: 'new' | 'reset' | 'received' | 'sent' | etc.
+// event.sessionKey: string
+// event.context.content: string (message:received/sent)
+// event.context.from/to: string
+// event.context.bootstrapFiles: array (agent:bootstrap)
+// event.messages: string[] (push to send messages to user)
+};
+export default hookHandler;
+
+### Mevcut bootstrap-context handler.js Akışı
+1. fetchLessons(agentId) → recall("behavioral lessons corrections mistakes", agent, memoryType: "lesson") — MAX_LESSON_CHARS=3000
+2. fetchRecentMemories(agentId, namespace) → 5 farklı query (recent events, decisions, feedback, config changes, context) — MAX_MEMORY_CHARS=8000
+3. fetchSharedNamespaceMemories() → shared namespace recall — MAX_CROSSAGENT_CHARS=2000
+4. Cross-agent recall (main → diğer agent'lar) — koşullu
+5. fetchDecisionMemories() → decision category recall
+6. Operational events: config_change, incident, deployment typed recall
+7. Last session summary + daily notes inject
+8. Tümü SESSION_CONTEXT bootstrap file olarak inject
+
+### Mevcut realtime-capture handler.js Akışı
+1. Message gelir → cleanMessage() ile envelope/metadata strip
+2. isCronNoise() + isLowSignal() filtreleme
+3. scoreImportance(): base 0.45, decision boost +0.9, feedback boost +0.85
+4. User mesajı: decision ise category="decision", feedback ise category="lesson" + feedback tags, diğer category="user"
+5. Assistant mesajı: category="assistant", importance=0.5
+6. store() → NoldoMem API'ye POST
+
+### Mevcut FEEDBACK_TAG_PATTERNS (realtime-capture)
+verification: [/neden doğrulamadın|kontrol etmedin|bakmadın/i, /verify/i, /doğrula/i]
+fabrication: [/fabrication/i, /yanlış bilgi|söyledin/i, /uydurma|dun/i]
+premature_suggestion: [/öneri|im/i, /premature suggestion/i]
+did_not_read_code: [/kodu okumadın|incelemedin/i, /did not read code/i]
+
+## Sorun Tanımı
+
+Agent (Claude) tekrarlayan fabrication yapıyor — özellik var/yok iddialarını kaynak koda bakmadan söylüyor, yanlış config bilgisi veriyor, context kaybediyor. Spesifik örnekler:
+
+1. "OpenClaw Brave LLM Context desteklemiyor" → Destekliyormuş, kaynak koda bakmadan söyledi
+2. xmcp MCP server önerdi → OpenClaw'da sıfır MCP desteği var
+3. "500 fleet pause'ta" → Sadece OpenClaw cron kontrol, crontab/SQLite queue gözden kaçtı
+4. Dashboard yanlış şifre seed → Security audit'te değişen şifreyi, eski şifre sanıp seed etti
+5. "Ne yapmaya çalışıyordun?" → Context kaybı, memory dosyalarını okumadan sordu
+
+Kök neden analizi: Prompt kuralları epistemik güvenilirlik için zayıf. LLM "varsayım mı yapıyorum?" diye kendini denetleyemiyor. Mevcut sistem post-mortem (hata olduktan sonra yakalıyor) ama prevention (hata olmadan önce önleme) yok.
+
+## Araştırma Bulguları
+
+### Chain-of-Verification (CoVe) — Meta Research (arxiv:2309.11495)
+4 aşamalı süreç: Draft response → Doğrulama soruları planla → Her soruyu bağımsız yanıtla → Doğrulanmış final response. Zero-Shot, Few-Shot ve CoT'dan daha iyi sonuç veriyor.
+
+### Anthropic Claude Resmi Dökümantasyonu
+- "I don't know" deme izni verme
+- Uzun dökümanlardan direct quote extraction (>20K token)
+- Citation-based verification: her claim için supporting quote bul, bulamazsan geri çek
+- Chain-of-thought verification: adım adım reasoning
+- External knowledge restriction: sadece verilen dökümanları kullan
+
+### Letta/MemGPT Agent Memory Mimarisi
+- Core memory (her zaman context'te, RAM gibi) + Recall memory (searchable log) + Archival memory (large semantic store)
+- Agent kendi memory'sini yönetir, core memory küçük ama kritik bilgileri tutar
+
+### AWS Verified Semantic Cache
+- Bilinen sorulara doğrulanmış cevapları cache'le
+- Yeni soru geldiğinde önce cache'e bak, cache hit ise LLM'e sormadan dön
+- Hallucination'ı bilinen sorular için sıfıra indirir
+
+### Memory Tipleri (CoALA + ICLR 2026 MemAgents)
+- Episodic: Spesifik olaylar ("22 Mart'ta Brave LLM Context'i yanlış rapor ettim")
+- Semantic: Genel bilgiler ("OpenClaw MCP desteklemiyor")
+- Procedural: Nasıl yapılacağı ("Config doğrulama: 1) grep, 2) cat, 3) curl")
+
+### OpenClaw Hook Sistemi — Kritik Bulgu
+message:received ve message:sent event'leri OpenClaw'da MEVCUT ama NoldoMem hook'ları bunları KULLANMIYOR. Bu en büyük fırsat.
+GitHub Issues: #8807 (message hooks request), #5279 (lifecycle hooks), #14210 (message:sent)
+</context>
+
+<task>
+NoldoMem memory sistemine 5 yeni mekanizma ekleyerek fabrication'ı önleyen, mid-conversation recall yapan ve doğrulanmış bilgileri cache'leyen kapsamlı bir iyileştirme yap.
+</task>
+
+<motivation>
+Kullanıcı (Doruk) "yanılmışım" tekrarından ciddi şekilde rahatsız. Her fabrication güven kaybettiriyor. Bu sadece prompt kuralı sorunu değil — mimari seviyede prevention gerekiyor. Memory sistemi reaktif değil proaktif olmalı.
+</motivation>
+
+<requirements>
+
+### Requirement 1: Question-Triggered Mid-Conversation Recall Hook
+Yeni hook: message-recall (message:received event'ine bağlı)
+- User mesajı geldiğinde, eğer özellik/config/servis/durum sorusu algılanırsa:
+- Pattern'ler: "X var mı?", "X destekleniyor mu?", "X çalışıyor mu?", "does X support Y?", "is X running?"
+- Mesajdan anahtar kelimeler çıkar (NLP gerekmez, regex + keyword extraction yeterli)
+- NoldoMem'den bu anahtar kelimelerle recall yap (lesson + verified_fact + incident kategorileri)
+- Sonuçları event.context.bootstrapFiles'a inject ET VEYA event.messages'a uyarı olarak ekle
+- Amaç: İlgili lesson tam sorunun sorulduğu anda context'e girsin, bootstrap'teki generic recall'a bağımlı olmasın
+- Timeout: max 2 saniye, timeout olursa skip et (response'u bloklamak yok)
+- Sadece ilk 500 char'ı al, max 3 sonuç
+
+### Requirement 2: Post-Response Claim Scanner Hook
+Yeni hook: claim-scanner (message:sent event'ine bağlı)
+- Agent cevabı gönderildikten sonra, response'u tara:
+- Negative claim pattern'leri: "desteklemiyor", "yok", "mevcut değil", "not supported", "doesn't have", "doesn't exist"
+- Positive claim pattern'leri: "düzelttim", "güncelledim", "tamamlandı", "fixed", "updated N files"
+- Config/password/hash claim'leri: hex string, hash, credential referansları
+- Her algılanan claim için: aynı session'ın son N mesajında tool call (exec, grep, cat, curl) olup olmadığını kontrol et
+- Tool evidence yoksa:
+1. NoldoMem'e unverified_claim olarak store et
+2. fabrication-log.json'a kayıt ekle
+3. Opsiyonel: event.messages'a "⚠️ Bu iddia tool ile doğrulanmadı" uyarısı (configurable)
+- NOT: Bu hook response'u ENGELLEMİYOR. Post-mortem audit, ama hızlı — hata pattern'ini yakalar
+
+### Requirement 3: Verified Facts Registry
+Yeni dosya: workspace/verified-facts.json + Hook entegrasyonu
+- Yapı:
+{
+"facts": {
+"openclaw-brave-llm-context": {
+"claim": "OpenClaw Brave LLM Context modunu destekliyor",
+"verified": true,
+"verifiedAt": "2026-03-22T03:00:00Z",
+"source": "grep 'llm-context' /usr/lib/node_modules/openclaw/dist/*.js",
+"agent": "main",
+"ttl": 604800
+}
+}
+}
+- after-tool-call hook'unu AKTİF ET ve genişlet:
+- Tool call'dan sonra eğer sonuç bir feature/config/servis doğrulaması ise, verified-facts.json'a kaydet
+- Pattern: grep/find sonucu + "found"/"not found" → fact kayıt
+- curl health check → servis durumu fact kayıt
+- bootstrap-context'e verified-facts.json loading ekle (küçük dosya, her zaman yüklenebilir)
+- Agent "X destekleniyor mu?" sorusuna cevap vermeden önce verified-facts.json'a bakabilir
+- TTL: 7 gün default, expired fact'lar "stale" olarak işaretlenir (silinmez, re-verification tetiklenir)
+
+### Requirement 4: Fabrication Incident Tracker
+Yeni dosya: workspace/fabrication-log.json
+- Yapı:
+{
+"incidents": [
+{
+"date": "2026-03-22",
+"type": "feature_claim",
+"claim": "Brave LLM Context not supported",
+"truth": "supported — found in source code",
+"rootCause": "no_tool_call",
+"agent": "main",
+"sessionKey": "agent:main:slack:channel:xxx"
+}
+],
+"stats": {
+"total": 5,
+"last7d": 2,
+"byType": {"feature_claim": 2, "config_error": 1, "incomplete_check": 1, "context_loss": 1},
+"byRootCause": {"no_tool_call": 3, "wrong_source": 1, "context_loss": 1}
+}
+}
+- bootstrap-context'e stats summary inject et (full log değil, sadece özet)
+- 7 günde 3+ incident → daha güçlü uyarı: "⚠️ Son 7 günde N fabrication incident. Tool ile doğrulama zorunlu."
+- claim-scanner hook tarafından otomatik populate edilir
+
+### Requirement 5: Lesson Kategorisi Güçlendirme
+Mevcut sorun: 9533 memory'den sadece 2 tanesi "lesson" kategorisinde. Bu çok düşük.
+- realtime-capture'daki feedback detection'ı iyileştir:
+- Daha geniş feedback pattern'leri ekle (Türkçe + İngilizce):
+/hayır.*öyle değil/i, /yanlış.*anladın/i, /tekrar.*oku/i,
+/bak.*kaynak/i, /kontrol et/i, /doğrula/i,
+/actually/i, /that's wrong/i, /check again/i,
+/no.*that's not/i, /look at the source/i
+- Agent'ın kendi düzeltmelerini de yakala: "yanılmışım", "pardon", "düzeltiyorum", "I was wrong"
+- Bu pattern'ler yakalandığında category="lesson" olarak store et (şu an bazıları "other" veya "qa_pair" oluyor)
+- after-tool-call hook'u aktif et:
+- Tool sonuçları (özellikle doğrulama tool call'ları) "verified_fact" memory_type ile store et
+- Bu verified fact'lar lesson recall'da da çıkar
+- Hedef: lesson kategori sayısı 2'den 50+'ya çıksın (organik büyüme ile)
+
+### Requirement 6 (Bonus): Prompt Kurallarını Konsolide Et
+- AGENTS.md'deki Anti-Fabrication Protocol, SOUL.md'deki "Doğrula, varsayma" ve handover/AGENTS.md'deki lesson'ı TEK yere topla
+- AGENTS.md'de max 15 satır, en kritik 3 kural en üstte:
+1. Feature var/yok iddiası = grep/find zorunlu
+2. "Düzelttim/güncelledim" iddiası = tool output göster
+3. Emin değilsen "emin değilim, kontrol ediyorum" de
+- SOUL.md'deki tekrarı kaldır (token tasarrufu)
+- handover/AGENTS.md'deki detaylı listeyi referans olarak tut ama bootstrap'te yükleme
+</requirements>
+
+<constraints>
+- Mevcut hook yapısını koru: handler.js formatı, ESM export, event schema değişmemeli
+- NoldoMem API'yi değiştirme: /v1/store ve /v1/recall endpoint'leri olduğu gibi kalacak. Yeni endpoint gerekiyorsa ayrı belirt
+- Performance: message:received hook max 2 saniye, message:sent hook max 3 saniye. Timeout durumunda graceful skip
+- Backward compatibility: Mevcut memory'ler ve kategoriler korunacak, yeni kategoriler eklenebilir
+- OpenClaw versiyonu: 2026.3.13. message:sent ve message:received event'leri mevcut ama NoldoMem hook'ları bunları kullanmıyor — KULLANMAYA BAŞLA
+- Dosya yapısı: Yeni hook'lar /opt/asuman/noldo-memory/hooks/ altında kendi dizinlerinde olacak
+- package.json güncellemesi: Yeni hook'lar openclaw.hooks array'ine eklenecek
+- Config: openclaw.json'daki hooks.internal.entries'e yeni hook'lar eklenecek
+- Test: Her yeni hook için en az 1 integration test yaz (mevcut test framework: pytest, /opt/asuman/noldo-memory/tests/)
+- Türkçe pattern'ler zorunlu: Kullanıcı Türkçe konuşuyor, tüm regex pattern'leri TR+EN olmalı
+- Var olan handler.js dosyalarını değiştirirken .example backup al
+- Gateway restart gerekiyor mu belirsiz — yeni hook eklemek restart gerektirir, bunu belirt
+</constraints>
+
+<output_format>
+Her requirement için:
+1. Hangi dosya(lar) oluşturulacak/değiştirilecek (tam path)
+2. Tam kod (handler.js, HOOK.md, test dosyası)
+3. Config değişiklikleri (openclaw.json, package.json)
+4. Deploy adımları (sıralı)
+
+Ayrıca:
+- workspace/verified-facts.json initial yapısı
+- workspace/fabrication-log.json initial yapısı
+- bootstrap-context handler.js değişiklikleri (diff veya full)
+- realtime-capture handler.js değişiklikleri (diff veya full)
+- package.json güncellemesi
+- openclaw.json config değişiklikleri
+- Test planı
+- Genel deployment checklist
+</output_format>
+
+<success_criteria>
+1. message:received hook çalışıyor: "OpenClaw X'i destekliyor mu?" sorusunda NoldoMem'den ilgili lesson/fact inject ediliyor
+2. message:sent hook çalışıyor: Agent "desteklemiyor" dediğinde ve aynı turn'de tool call yoksa uyarı logu/store yapılıyor
+3. verified-facts.json bootstrap'te yükleniyor ve agent'lar tarafından okunabiliyor
+4. fabrication-log.json populate ediliyor ve bootstrap'te stats summary inject ediliyor
+5. Lesson kategori sayısı artıyor (yeni feedback pattern'leri ile)
+6. after-tool-call hook aktif ve verified_fact store ediyor
+7. Tüm hook'lar 2-3 saniye timeout ile çalışıyor, timeout'ta graceful skip
+8. Gateway restart sonrası tüm yeni hook'lar openclaw hooks list'te görünüyor
+9. AGENTS.md anti-fabrication kuralları konsolide edilmiş (max 15 satır)
+10. En az 1 integration test her yeni hook için
+</success_criteria>
+
+<research_references>
+1. Chain-of-Verification (CoVe) — Meta Research, arxiv:2309.11495
+2. Anthropic Claude Hallucination Reduction — docs.claude.com
+3. Letta/MemGPT Memory Architecture — docs.letta.com
+4. AWS Verified Semantic Cache — aws.amazon.com/blogs
+5. CoALA Agent Memory Framework — Episodic + Semantic + Procedural
+6. ICLR 2026 MemAgents Workshop — openreview.net
+7. OpenClaw Hooks Documentation — docs.openclaw.ai/automation/hooks
+8. OpenClaw GitHub Issues — #8807, #5279, #14210
+9. Lakera Hallucination Guide 2026 — lakera.ai
+10. Preprints.org Guardrail Review 2025
+</research_references>
