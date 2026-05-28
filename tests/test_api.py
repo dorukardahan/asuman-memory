@@ -253,6 +253,21 @@ class TestStore:
         assert resp.status_code == 200
         assert resp.json()["stored"] is True
 
+    async def test_store_preserves_session_id_as_source_session(self, client):
+        resp = await client.post("/v1/store", json={
+            "text": "Memory with Hermes session provenance",
+            "session_id": "20260528_231900_ab12cd",
+        })
+
+        assert resp.status_code == 200
+        mid = resp.json()["id"]
+        storage = api_module._storage_pool.get("main")
+        row = storage._get_conn().execute(
+            "SELECT source_session FROM memories WHERE id = ?", (mid,)
+        ).fetchone()
+        assert row is not None
+        assert row["source_session"] == "20260528_231900_ab12cd"
+
     async def test_store_embeds_inline_when_worker_disabled(self, client):
         api_module._config.embed_worker_enabled = False
 

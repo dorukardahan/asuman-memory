@@ -295,6 +295,21 @@ class NoldoMemProvider(MemoryProvider):
         thread.start()
         self._threads.append(thread)
 
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        if not new_session_id:
+            return
+        self._session_id = new_session_id
+        if reset:
+            with self._lock:
+                self._cache.clear()
+
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         if not self._config.tools_enabled:
             return []

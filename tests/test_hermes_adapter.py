@@ -152,3 +152,48 @@ def test_store_rejects_invalid_memory_type(monkeypatch, tmp_path):
 
     assert result["success"] is False
     assert "invalid memory_type" in result["error"]
+
+
+def test_session_switch_updates_default_tool_session(monkeypatch, tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text("test-key", encoding="utf-8")
+    monkeypatch.setenv("NOLDOMEM_API_KEY_FILE", str(key_file))
+
+    captured = {}
+
+    class FakeClient:
+        def store(self, body):
+            captured.update(body)
+            return {"stored": True}
+
+    provider = NoldoMemProvider()
+    provider.initialize("session-1", hermes_home=str(tmp_path))
+    provider._client = FakeClient()
+
+    provider.on_session_switch(
+        "session-2",
+        parent_session_id="session-1",
+        reset=False,
+        reason="compression",
+    )
+    result = json.loads(
+        provider.handle_tool_call("noldomem_store", {"text": "rotated session memory"})
+    )
+
+    assert result["success"] is True
+    assert captured["session_id"] == "session-2"
+
+
+def test_session_switch_reset_clears_prefetch_cache(monkeypatch, tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text("test-key", encoding="utf-8")
+    monkeypatch.setenv("NOLDOMEM_API_KEY_FILE", str(key_file))
+
+    provider = NoldoMemProvider()
+    provider.initialize("session-1", hermes_home=str(tmp_path))
+    provider._cache["session-1:query"] = (1.0, "old result")
+
+    provider.on_session_switch("session-2", parent_session_id="session-1", reset=True)
+
+    assert provider._session_id == "session-2"
+    assert provider._cache == {}

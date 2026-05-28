@@ -35,10 +35,14 @@ Example store request:
 {
   "text": "The user prefers concise status updates.",
   "agent": "external-agent",
+  "session_id": "runtime-session-id",
   "namespace": "default",
   "memory_type": "preference"
 }
 ```
+
+`session_id` is optional. When supplied, NoldoMem stores it as
+`source_session` so later audits can trace the originating runtime session.
 
 Example pin request:
 
@@ -98,6 +102,7 @@ host runtime supports them:
 - cached recall context for the current turn
 - background recall for the next turn
 - queued completed-turn storage
+- session-rotation handling when the host runtime changes the active session id
 - explicit memory tool schemas when enabled
 - tool-call mapping to NoldoMem HTTP endpoints
 - shutdown flushing for queued writes

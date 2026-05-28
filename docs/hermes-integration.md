@@ -14,16 +14,20 @@ memory:
   provider: noldomem
   memory_enabled: false
   user_profile_enabled: false
-
-agent:
-  disabled_toolsets:
-    - memory
 ```
 
-This disables Hermes' native `MEMORY.md` / `USER.md` prompt injection and hides
-the built-in `memory` tool, while keeping the NoldoMem provider and
-`session_search` available. Running both long-term memory systems at once is
-possible, but it can create duplicate or conflicting facts.
+This disables Hermes' native `MEMORY.md` / `USER.md` prompt injection while
+keeping the NoldoMem provider and `session_search` available. Running both
+long-term memory systems at once is possible, but it can create duplicate or
+conflicting facts.
+
+Hermes v2026.5.28 gates `MemoryProvider` tools behind the `memory` toolset when
+an explicit toolset list is configured. If a platform/profile uses
+`platform_toolsets` or another explicit `enabled_toolsets` path, make sure the
+effective toolsets still include `memory`; otherwise `noldomem_recall`,
+`noldomem_store`, and `noldomem_pin` will not be injected. If you need to hide
+Hermes' built-in file-backed `memory` tool, verify the live tool surface after
+changing toolsets instead of assuming the external provider remains visible.
 
 ## Required API
 
@@ -52,10 +56,14 @@ Example store request:
 {
   "text": "The user prefers concise Turkish status updates.",
   "agent": "hermes",
+  "session_id": "20260528_231900_ab12cd",
   "namespace": "default",
   "memory_type": "preference"
 }
 ```
+
+`session_id` is optional. When supplied, NoldoMem stores it as
+`source_session` for provenance.
 
 Example pin request:
 
@@ -113,6 +121,8 @@ The native Hermes provider should implement Hermes' `MemoryProvider` lifecycle:
 - `prefetch()` returns cached recall context quickly
 - `queue_prefetch()` performs background recall for the next turn
 - `sync_turn()` queues completed-turn storage
+- `on_session_switch()` updates cached session scope after `/resume`,
+  `/branch`, `/reset`, `/new`, and context compression
 - `get_tool_schemas()` exposes explicit memory tools when enabled
 - `handle_tool_call()` maps tool calls to NoldoMem HTTP endpoints
 - `shutdown()` flushes queued writes

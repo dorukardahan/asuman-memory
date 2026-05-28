@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.27.13] - 2026-05-28
+
+### Fixed
+- Keep the Hermes NoldoMem adapter's cached session id aligned when Hermes v2026.5.28 rotates sessions during compression, reset, resume, or branch flows.
+- Preserve optional `/v1/store` `session_id` provenance as `source_session`, so Hermes adapter writes can be traced to the originating session after rotation.
+
+### Changed
+- Document Hermes v2026.5.28 memory-provider toolset gating and the Dorry/Dobby scope requirement so NoldoMem tools remain visible while legacy `hermes` scope stays historical.
+
 ## [1.27.12] - 2026-05-22
 
 ### Changed

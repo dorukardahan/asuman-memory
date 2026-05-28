@@ -265,6 +265,10 @@ the public HTTP API. Hermes Agent has a native `MemoryProvider` adapter in
 [`adapters/hermes/noldomem`](./adapters/hermes/noldomem); general external
 runtime guidance lives in
 [`docs/external-runtime-adapters.md`](./docs/external-runtime-adapters.md).
+For Hermes v2026.5.28+, verify that the effective toolsets still expose
+`noldomem_recall`, `noldomem_store`, and `noldomem_pin`; external
+`MemoryProvider` tools are gated by the `memory` toolset when explicit toolsets
+are configured.
 
 ```markdown
 ## Memory API (NoldoMem)
@@ -275,8 +279,9 @@ All requests need headers:
 - X-API-Key: <key> (read from ~/.noldomem/memory-api-key)
 
 ### Store a memory
-POST /v1/store {"text": "...", "agent": "YOUR_AGENT_ID"}
+POST /v1/store {"text": "...", "agent": "YOUR_AGENT_ID", "session_id": "OPTIONAL_SESSION_ID"}
 - Auto-classified as: fact, preference, rule, conversation, or lesson
+- Optional `session_id` is stored as provenance (`source_session`)
 
 ### Recall memories
 POST /v1/recall {"query": "...", "agent": "YOUR_AGENT_ID", "limit": 5}

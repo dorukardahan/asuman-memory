@@ -518,6 +518,7 @@ class StoreRequest(RequestModel):
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     namespace: str = Field(default="default", description="Namespace for topic-based grouping")
     source: Optional[str] = Field(default=None, description="Provenance label: api, hook, session_capture, import, auto_escalation")
+    session_id: Optional[str] = Field(default=None, max_length=200, description="Optional source session provenance")
     memory_type: Optional[VALID_MEMORY_TYPES] = Field(default=None, description="Pre-assigned memory type from hook (overrides classifier if set)")
     agent: Optional[str] = None
 
@@ -907,7 +908,7 @@ async def store(req: StoreRequest, request: Request) -> Dict[str, Any]:
         vector=vector,
         category=category,
         importance=importance,
-        source_session=None,
+        source_session=req.session_id,
         namespace=req.namespace,
         memory_type=resolved_memory_type,
         source=source,
