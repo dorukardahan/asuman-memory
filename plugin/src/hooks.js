@@ -117,6 +117,12 @@ const OPERATIONAL_TOOL_PATTERNS = [
   /\\b(error|failed|traceback|exception|timeout|oom|sigkill)\\b/i,
 ];
 
+const NOLDOMEM_TOOL_NAME_RE = /(?:^|[/:.])noldomem_(?:recall|store|pin)$/;
+
+function isNoldoMemToolName(toolName) {
+  return typeof toolName === "string" && NOLDOMEM_TOOL_NAME_RE.test(toolName.trim());
+}
+
 function redactOperationalText(text) {
   let out = String(text || "");
   for (const pattern of SECRET_PATTERNS) {
@@ -145,6 +151,9 @@ function toCompactText(value, maxChars = 1200) {
 }
 
 function shouldCaptureOperationalTool(event) {
+  // Avoid recursively capturing NoldoMem's own explicit memory tool calls.
+  if (isNoldoMemToolName(event?.toolName)) return false;
+
   const haystack = [
     event?.toolName,
     toCompactText(event?.params, 500),
