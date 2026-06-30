@@ -186,6 +186,8 @@ The plugin gives agents explicit `noldomem_recall`, `noldomem_store`, and
 and bootstrap context injection. The package declares its runtime entrypoint for
 the OpenClaw 2026.5.2+ plugin installer path. See
 [`plugin/README.md`](./plugin/README.md).
+Operational capture ignores NoldoMem's own explicit tools, so memory reads and
+writes do not recursively create extra memory writes.
 
 For OpenClaw 2026.5.20+, keep compaction capture at the host's 30 second
 default so NoldoMem's bounded capture request has room to finish without

@@ -55,6 +55,23 @@ def test_native_plugin_registers_current_openclaw_typed_hooks():
     assert 'api.on("subagent_ended"' in hooks_source
 
 
+def test_operational_capture_skips_noldomem_self_capture():
+    repo_root = Path(__file__).resolve().parent.parent
+    plugin_root = repo_root / "plugin"
+    hooks_source = (plugin_root / "src" / "hooks.js").read_text()
+    manifest = json.loads((plugin_root / "openclaw.plugin.json").read_text())
+
+    assert "NOLDOMEM_TOOL_NAME_RE" in hooks_source
+    assert "function isNoldoMemToolName(toolName)" in hooks_source
+    assert "if (isNoldoMemToolName(event?.toolName)) return false;" in hooks_source
+    assert hooks_source.index("isNoldoMemToolName(event?.toolName)") < hooks_source.index("const haystack =")
+    assert manifest["contracts"]["tools"] == [
+        "noldomem_recall",
+        "noldomem_store",
+        "noldomem_pin",
+    ]
+
+
 def test_docs_keep_compaction_capture_on_openclaw_520_timeout_default():
     repo_root = Path(__file__).resolve().parent.parent
     root_readme = (repo_root / "README.md").read_text()

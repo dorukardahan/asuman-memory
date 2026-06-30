@@ -62,6 +62,8 @@ On OpenClaw 2026.5.20+, keep `before_compaction` at the host's 30 second
 default so NoldoMem's bounded capture request has room to finish. These
 timeouts do not change explicit `noldomem_recall`, `noldomem_store`, or
 `noldomem_pin` tool calls.
+Operational capture also ignores those NoldoMem tools, so a memory tool call
+does not recursively trigger another memory write.
 
 Restart OpenClaw after installing.
 
