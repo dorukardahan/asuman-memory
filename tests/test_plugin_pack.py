@@ -114,22 +114,39 @@ registerNativeLifecycleCapture(api, client, {
   enableOperationalCapture: true, enableCompactionCapture: false,
   enableSubagentCapture: false, defaultNamespace: "default",
 });
-const sentinels = ["startsWithS-SENTINEL", "valueHasS-SENTINEL"];
+const sentinels = [
+  "startsWithS-SENTINEL", "valueHasS-SENTINEL", "space secret SENTINEL",
+  "escaped secret SENTINEL", "nested-array-SENTINEL", "cycle-SENTINEL",
+];
 await handler({ toolName: "terminal",
-  params: `git push password=${sentinels[0]} many   spaces\ninside`,
-  result: `failed token=${sentinels[1]}` }, { agentId: "test" });
-await handler({ toolName: "terminal", params: { command: "git push" },
-  error: `failed secret=${sentinels[0]}` }, { agentId: "test" });
+  params: {
+    command: "git push", password: sentinels[0],
+    nested: { API_KEY: sentinels[1], safe: "structured capture stays" },
+    items: [{ "api-key": sentinels[4] }, { safe: "array capture stays" }],
+  },
+  result: { token: sentinels[2], nested: { passwd: sentinels[3], status: "failed safely" } },
+}, { agentId: "test" });
+await handler({ toolName: "terminal", params: { command: "git push", safe: "error capture stays" },
+  error: { message: "failed", details: [{ pwd: sentinels[4] }, { safe: "error detail stays" }] },
+}, { agentId: "test" });
+await handler({ toolName: "terminal",
+  params: `git push "password"="${sentinels[2]}" 'api-key'='${sentinels[3]}' many   spaces\ninside`,
+  result: `failed token="${sentinels[0]} with spaces" secret='${sentinels[1]} and spaces' password="escaped \\"${sentinels[3]}\\" value"`,
+}, { agentId: "test" });
+const cyclic = { command: "git push", password: sentinels[5], safe: "cycle capture stays" };
+cyclic.self = cyclic;
+await handler({ toolName: "terminal", params: cyclic, result: "completed normally" }, { agentId: "test" });
 console.warn = originalWarn;
-if (stores.length !== 2) throw new Error(`captures: ${stores.length}`);
+if (stores.length !== 4) throw new Error(`captures: ${stores.length}`);
 const persisted = JSON.stringify(stores);
 const logged = logs.join(" ");
 for (const sentinel of sentinels) {
   if (persisted.includes(sentinel)) throw new Error(`sentinel persisted: ${sentinel}`);
   if (logged.includes(sentinel)) throw new Error(`sentinel logged: ${sentinel}`);
 }
-for (const marker of ["password=<redacted>", "token=<redacted>", "secret=<redacted>"]) {
-  if (!persisted.includes(marker)) throw new Error(`missing redaction: ${marker}`);
+for (const marker of ["<redacted>", "structured capture stays", "array capture stays",
+  "error capture stays", "error detail stays", "cycle capture stays", "completed normally"]) {
+  if (!persisted.includes(marker)) throw new Error(`missing capture marker: ${marker}`);
 }
 if (!persisted.includes("many spaces inside")) throw new Error("whitespace not compacted");
 """

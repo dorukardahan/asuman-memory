@@ -103,7 +103,7 @@ function shouldTriggerRecall(text) {
 }
 
 const SECRET_PATTERNS = [
-  /\b(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*[^\s,;]+/gi,
+  /((?:["'])?(?:api[_-]?key|token|secret|password|passwd|pwd)(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /\bsk-[A-Za-z0-9_-]{12,}/g,
 ];
@@ -132,13 +132,29 @@ function isNoldoMemToolName(toolName) {
 
 function redactOperationalText(text) {
   let out = String(text || "");
-  for (const pattern of SECRET_PATTERNS) {
-    out = out.replace(pattern, (match) => {
-      const prefix = match.split(/[:=]/, 1)[0] || "secret";
-      return `${prefix}=<redacted>`;
-    });
-  }
+  out = out.replace(SECRET_PATTERNS[0], (_match, prefix) => `${prefix}<redacted>`);
+  for (const pattern of SECRET_PATTERNS.slice(1)) out = out.replace(pattern, "<redacted>");
   return out;
+}
+
+function sanitizeStructuredValue(value, seen = new WeakSet()) {
+  if (value == null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value !== "object") return "<redacted>";
+  if (seen.has(value)) return "<redacted>";
+  if (Array.isArray(value)) {
+    seen.add(value);
+    return value.map((item) => sanitizeStructuredValue(item, seen));
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return "<redacted>";
+  seen.add(value);
+  const sanitized = {};
+  for (const [key, item] of Object.entries(value)) {
+    sanitized[key] = /^(?:api[_-]?key|token|secret|password|passwd|pwd)$/i.test(key)
+      ? "<redacted>"
+      : sanitizeStructuredValue(item, seen);
+  }
+  return sanitized;
 }
 
 function toCompactText(value, maxChars = 1200) {
@@ -148,9 +164,9 @@ function toCompactText(value, maxChars = 1200) {
     text = value;
   } else {
     try {
-      text = JSON.stringify(value);
+      text = JSON.stringify(sanitizeStructuredValue(value));
     } catch {
-      text = String(value);
+      text = "<redacted>";
     }
   }
   text = redactOperationalText(text).replace(/\s+/g, " ").trim();
