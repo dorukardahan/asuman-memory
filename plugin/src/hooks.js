@@ -176,14 +176,11 @@ function sanitizeStructuredValue(value, active = new WeakSet()) {
 function toCompactText(value, maxChars = 1200) {
   if (value == null) return "";
   let text = "";
-  if (typeof value === "string") {
-    text = value;
-  } else {
-    try {
-      text = JSON.stringify(sanitizeStructuredValue(value));
-    } catch {
-      text = "<redacted>";
-    }
+  try {
+    const sanitized = sanitizeStructuredValue(value);
+    text = typeof sanitized === "string" ? sanitized : JSON.stringify(sanitized);
+  } catch {
+    text = "<redacted>";
   }
   text = redactOperationalText(text).replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
