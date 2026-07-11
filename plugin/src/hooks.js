@@ -137,24 +137,40 @@ function redactOperationalText(text) {
   return out;
 }
 
-function sanitizeStructuredValue(value, seen = new WeakSet()) {
-  if (value == null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+function sanitizeStructuredValue(value, active = new WeakSet()) {
+  if (typeof value === "string") {
+    const candidate = value.trim();
+    if (!((candidate.startsWith("{") && candidate.endsWith("}")) ||
+          (candidate.startsWith("[") && candidate.endsWith("]")))) return value;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!Array.isArray(parsed) &&
+          (parsed === null || Object.getPrototypeOf(parsed) !== Object.prototype)) return value;
+      return JSON.stringify(sanitizeStructuredValue(parsed, active));
+    } catch {
+      return value;
+    }
+  }
+  if (value == null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value !== "object") return "<redacted>";
-  if (seen.has(value)) return "<redacted>";
-  if (Array.isArray(value)) {
-    seen.add(value);
-    return value.map((item) => sanitizeStructuredValue(item, seen));
-  }
+  if (active.has(value)) return "<redacted>";
   const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return "<redacted>";
-  seen.add(value);
-  const sanitized = {};
-  for (const [key, item] of Object.entries(value)) {
-    sanitized[key] = /^(?:api[_-]?key|token|secret|password|passwd|pwd)$/i.test(key)
-      ? "<redacted>"
-      : sanitizeStructuredValue(item, seen);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return "<redacted>";
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => sanitizeStructuredValue(item, active));
+    }
+    const sanitized = {};
+    for (const [key, item] of Object.entries(value)) {
+      sanitized[key] = /^(?:api[_-]?key|token|secret|password|passwd|pwd)$/i.test(key)
+        ? "<redacted>"
+        : sanitizeStructuredValue(item, active);
+    }
+    return sanitized;
+  } finally {
+    active.delete(value);
   }
-  return sanitized;
 }
 
 function toCompactText(value, maxChars = 1200) {

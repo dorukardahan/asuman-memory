@@ -159,6 +159,64 @@ if (!persisted.includes("many spaces inside")) throw new Error("whitespace not c
     )
 
 
+def test_operational_capture_sanitizes_json_strings_and_shared_reference_dags():
+    repo_root = Path(__file__).resolve().parent.parent
+    script = r"""
+import { registerNativeLifecycleCapture } from "./plugin/src/hooks.js";
+let handler;
+const stores = [];
+const logs = [];
+const originalWarn = console.warn;
+console.warn = (...args) => logs.push(args.join(" "));
+const api = { on(name, callback) { if (name === "after_tool_call") handler = callback; } };
+const client = { async store(body) { stores.push(body); } };
+registerNativeLifecycleCapture(api, client, {
+  enableOperationalCapture: true, enableCompactionCapture: false,
+  enableSubagentCapture: false, defaultNamespace: "default",
+});
+const sentinels = ["json-param-SENTINEL", "json-result-SENTINEL", "json-error-SENTINEL",
+  "json-array-SENTINEL", "json-deep-SENTINEL", "dag-SENTINEL", "cycle-SENTINEL"];
+await handler({ toolName: "terminal", params: {
+  command: "git push",
+  encoded: JSON.stringify({ password: sentinels[0], safe: "json params stay",
+    nestedEncoded: JSON.stringify([{ token: sentinels[4], safe: "deep json stays" }]) }),
+  array: [JSON.stringify([{ api_key: sentinels[3], safe: "json array stays" }]), '"ordinary JSON primitive"'],
+}, result: JSON.stringify({ secret: sentinels[1], safe: "json result stays" }) }, { agentId: "test" });
+await handler({ toolName: "terminal", params: { command: "git push" },
+  error: { message: "failed", encoded: JSON.stringify({ pwd: sentinels[2], safe: "json error stays" }) },
+}, { agentId: "test" });
+const shared = { token: sentinels[5], safe: "shared safe stays" };
+await handler({ toolName: "terminal", params: { command: "git push", first: shared, second: shared },
+  result: "completed" }, { agentId: "test" });
+const cyclic = { command: "git push", secret: sentinels[6], safe: "cycle safe stays" };
+cyclic.self = cyclic;
+await handler({ toolName: "terminal", params: cyclic, result: "completed" }, { agentId: "test" });
+console.warn = originalWarn;
+if (stores.length !== 4) throw new Error(`captures: ${stores.length}`);
+const persisted = JSON.stringify(stores);
+const logged = logs.join(" ");
+for (const sentinel of sentinels) {
+  if (persisted.includes(sentinel)) throw new Error(`sentinel persisted: ${sentinel}`);
+  if (logged.includes(sentinel)) throw new Error(`sentinel logged: ${sentinel}`);
+}
+for (const marker of ["json params stay", "deep json stays", "json array stays", "json result stays",
+  "json error stays", "cycle safe stays", "ordinary JSON primitive"]) {
+  if (!persisted.includes(marker)) throw new Error(`missing marker: ${marker}`);
+}
+if ((persisted.match(/shared safe stays/g) || []).length !== 2) {
+  throw new Error(`shared DAG occurrences were not both preserved: ${persisted}`);
+}
+if ((persisted.match(/token/g) || []).length < 2) throw new Error("shared secret keys not preserved/redacted twice");
+"""
+    subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_docs_keep_compaction_capture_on_openclaw_520_timeout_default():
     repo_root = Path(__file__).resolve().parent.parent
     root_readme = (repo_root / "README.md").read_text()

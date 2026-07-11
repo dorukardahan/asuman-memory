@@ -9,7 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.27.14] - 2026-07-11
 
 ### Fixed
-- Harden native OpenClaw operational capture: recursively redact secret-keyed structured values (including nested arrays and objects), safely close cycles, redact complete quoted/raw assignment values, and normalize whitespace before persistence. Skip only canonical/known-qualified NoldoMem recall, store, and pin tool IDs while preserving unrelated and normal operational capture.
+- Harden native OpenClaw operational capture: recursively redact secret-keyed structured values (including nested arrays, objects, and JSON-encoded object/array strings), safely close true cycles without dropping repeated DAG references, redact complete quoted/raw assignment values, and normalize whitespace before persistence. Skip only canonical/known-qualified NoldoMem recall, store, and pin tool IDs while preserving unrelated and normal operational capture.
 - Restore reliable source and wheel builds with the supported setuptools legacy backend and enforce distribution builds in CI.
 
 ## [1.27.13] - 2026-05-28
