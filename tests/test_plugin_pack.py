@@ -56,40 +56,82 @@ def test_native_plugin_registers_current_openclaw_typed_hooks():
     assert 'api.on("subagent_ended"' in hooks_source
 
 
-def test_operational_capture_skips_noldomem_self_capture():
+def test_operational_capture_uses_exact_normalized_self_tool_allowlist():
     repo_root = Path(__file__).resolve().parent.parent
     script = r"""
 import { registerNativeLifecycleCapture } from "./plugin/src/hooks.js";
-
 let handler;
 const api = { on(name, callback) { if (name === "after_tool_call") handler = callback; } };
 const stores = [];
 const client = { async store(body) { stores.push(body); } };
 registerNativeLifecycleCapture(api, client, {
-  enableOperationalCapture: true,
-  enableCompactionCapture: false,
-  enableSubagentCapture: false,
-  defaultNamespace: "default",
+  enableOperationalCapture: true, enableCompactionCapture: false,
+  enableSubagentCapture: false, defaultNamespace: "default",
 });
-
-for (const toolName of [
-  "noldomem_recall",
-  "noldomem_store",
-  "noldomem_pin",
-  "plugin:noldomem_recall",
-  "noldomem/noldomem_store",
-  "memory.noldomem_pin",
-]) {
+const supported = ["recall", "store", "pin"].flatMap((action) => [
+  `noldomem_${action}`, `plugin:noldomem_${action}`,
+  `noldomem/noldomem_${action}`, `memory.noldomem_${action}`,
+]);
+for (const toolName of [...supported, "  PLUGIN:NOLDOMEM_RECALL  ", "Memory.NoldoMem_Store"]) {
   await handler({ toolName, params: { command: "git push" }, result: "failed" }, { agentId: "test" });
 }
 if (stores.length !== 0) throw new Error(`self tools captured ${stores.length} times`);
-
-await handler(
-  { toolName: "terminal", params: { command: "git push" }, result: "push completed" },
-  { agentId: "test" },
-);
-if (stores.length !== 1) throw new Error(`normal operational tool captures: ${stores.length}`);
+const unrelated = [
+  "other:noldomem_recall", "vendor/noldomem_store",
+  "unrelated.memory.noldomem_pin", "plugin:noldomem_recall_extra",
+  "plugin:noldomemrecall",
+];
+for (const toolName of unrelated) {
+  await handler({ toolName, params: { command: "git push" }, result: "completed" }, { agentId: "test" });
+}
+if (stores.length !== unrelated.length) throw new Error(`unrelated captures: ${stores.length}`);
+stores.length = 0;
+await handler({ toolName: "terminal", params: { command: "git push" }, result: "push completed" }, { agentId: "test" });
+if (stores.length !== 1) throw new Error(`normal operational captures: ${stores.length}`);
 if (stores[0].source !== "plugin-after-tool-call") throw new Error("unexpected capture source");
+"""
+    subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_operational_capture_redacts_params_result_error_and_compacts_whitespace():
+    repo_root = Path(__file__).resolve().parent.parent
+    script = r"""
+import { registerNativeLifecycleCapture } from "./plugin/src/hooks.js";
+let handler;
+const stores = [];
+const logs = [];
+const originalWarn = console.warn;
+console.warn = (...args) => logs.push(args.join(" "));
+const api = { on(name, callback) { if (name === "after_tool_call") handler = callback; } };
+const client = { async store(body) { stores.push(body); } };
+registerNativeLifecycleCapture(api, client, {
+  enableOperationalCapture: true, enableCompactionCapture: false,
+  enableSubagentCapture: false, defaultNamespace: "default",
+});
+const sentinels = ["startsWithS-SENTINEL", "valueHasS-SENTINEL"];
+await handler({ toolName: "terminal",
+  params: `git push password=${sentinels[0]} many   spaces\ninside`,
+  result: `failed token=${sentinels[1]}` }, { agentId: "test" });
+await handler({ toolName: "terminal", params: { command: "git push" },
+  error: `failed secret=${sentinels[0]}` }, { agentId: "test" });
+console.warn = originalWarn;
+if (stores.length !== 2) throw new Error(`captures: ${stores.length}`);
+const persisted = JSON.stringify(stores);
+const logged = logs.join(" ");
+for (const sentinel of sentinels) {
+  if (persisted.includes(sentinel)) throw new Error(`sentinel persisted: ${sentinel}`);
+  if (logged.includes(sentinel)) throw new Error(`sentinel logged: ${sentinel}`);
+}
+for (const marker of ["password=<redacted>", "token=<redacted>", "secret=<redacted>"]) {
+  if (!persisted.includes(marker)) throw new Error(`missing redaction: ${marker}`);
+}
+if (!persisted.includes("many spaces inside")) throw new Error("whitespace not compacted");
 """
     subprocess.run(
         ["node", "--input-type=module", "--eval", script],

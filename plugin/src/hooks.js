@@ -103,7 +103,7 @@ function shouldTriggerRecall(text) {
 }
 
 const SECRET_PATTERNS = [
-  /\b(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*[^\\s,;]+/gi,
+  /\b(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*[^\s,;]+/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /\bsk-[A-Za-z0-9_-]{12,}/g,
 ];
@@ -117,10 +117,17 @@ const OPERATIONAL_TOOL_PATTERNS = [
   /\b(error|failed|traceback|exception|timeout|oom|sigkill)\b/i,
 ];
 
-const NOLDOMEM_TOOL_NAME_RE = /(?:^|[/:.])noldomem_(?:recall|store|pin)$/;
+// Canonical ids plus the qualification forms known to be emitted by OpenClaw.
+// This is deliberately explicit: suffix matching suppresses unrelated plugins.
+const NOLDOMEM_TOOL_NAMES = new Set([
+  "noldomem_recall", "noldomem_store", "noldomem_pin",
+  "plugin:noldomem_recall", "plugin:noldomem_store", "plugin:noldomem_pin",
+  "noldomem/noldomem_recall", "noldomem/noldomem_store", "noldomem/noldomem_pin",
+  "memory.noldomem_recall", "memory.noldomem_store", "memory.noldomem_pin",
+]);
 
 function isNoldoMemToolName(toolName) {
-  return typeof toolName === "string" && NOLDOMEM_TOOL_NAME_RE.test(toolName.trim());
+  return typeof toolName === "string" && NOLDOMEM_TOOL_NAMES.has(toolName.trim().toLowerCase());
 }
 
 function redactOperationalText(text) {
@@ -146,7 +153,7 @@ function toCompactText(value, maxChars = 1200) {
       text = String(value);
     }
   }
-  text = redactOperationalText(text).replace(/\\s+/g, " ").trim();
+  text = redactOperationalText(text).replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
 }
 

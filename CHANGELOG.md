@@ -9,7 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.27.14] - 2026-07-11
 
 ### Fixed
-- Prevent native OpenClaw operational capture from recursively storing `noldomem_recall`, `noldomem_store`, and `noldomem_pin` calls while preserving capture for normal operational tools.
+- Harden native OpenClaw operational capture: redact secret values and normalize whitespace before persistence, and skip only canonical/known-qualified NoldoMem recall, store, and pin tool IDs while preserving capture for unrelated and normal operational tools.
 - Restore reliable source and wheel builds with the supported setuptools legacy backend and enforce distribution builds in CI.
 
 ## [1.27.13] - 2026-05-28
