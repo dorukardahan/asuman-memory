@@ -31,6 +31,9 @@ jobs:
           OPENROUTER_API_KEY: test-key-for-ci
         run: bash scripts/audit.sh --ci
 
+      - name: Build Python distributions
+        run: python -m build --sdist --wheel
+
       - name: Security audit
         run: |
           pip install pip-audit
