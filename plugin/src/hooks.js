@@ -110,11 +110,11 @@ const SECRET_PATTERNS = [
 
 const OPERATIONAL_TOOL_PATTERNS = [
   /\bsystemctl\b/i,
-  /\bdocker(?:\\s+compose)?\b/i,
-  /\bgit\\s+(?:commit|merge|push|pull|tag|checkout|switch)\b/i,
-  /\b(openclaw|clawhub)\\s+(?:update|plugins|hooks|install|publish)\b/i,
-  /\b(?:npm|pnpm|yarn|pip|uv|apt)\\s+(?:install|add|update|upgrade)\b/i,
-  /\\b(error|failed|traceback|exception|timeout|oom|sigkill)\\b/i,
+  /\bdocker(?:\s+compose)?\b/i,
+  /\bgit\s+(?:commit|merge|push|pull|tag|checkout|switch)\b/i,
+  /\b(openclaw|clawhub)\s+(?:update|plugins|hooks|install|publish)\b/i,
+  /\b(?:npm|pnpm|yarn|pip|uv|apt)\s+(?:install|add|update|upgrade)\b/i,
+  /\b(error|failed|traceback|exception|timeout|oom|sigkill)\b/i,
 ];
 
 const NOLDOMEM_TOOL_NAME_RE = /(?:^|[/:.])noldomem_(?:recall|store|pin)$/;

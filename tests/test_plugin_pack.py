@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -57,19 +58,46 @@ def test_native_plugin_registers_current_openclaw_typed_hooks():
 
 def test_operational_capture_skips_noldomem_self_capture():
     repo_root = Path(__file__).resolve().parent.parent
-    plugin_root = repo_root / "plugin"
-    hooks_source = (plugin_root / "src" / "hooks.js").read_text()
-    manifest = json.loads((plugin_root / "openclaw.plugin.json").read_text())
+    script = r"""
+import { registerNativeLifecycleCapture } from "./plugin/src/hooks.js";
 
-    assert "NOLDOMEM_TOOL_NAME_RE" in hooks_source
-    assert "function isNoldoMemToolName(toolName)" in hooks_source
-    assert "if (isNoldoMemToolName(event?.toolName)) return false;" in hooks_source
-    assert hooks_source.index("isNoldoMemToolName(event?.toolName)") < hooks_source.index("const haystack =")
-    assert manifest["contracts"]["tools"] == [
-        "noldomem_recall",
-        "noldomem_store",
-        "noldomem_pin",
-    ]
+let handler;
+const api = { on(name, callback) { if (name === "after_tool_call") handler = callback; } };
+const stores = [];
+const client = { async store(body) { stores.push(body); } };
+registerNativeLifecycleCapture(api, client, {
+  enableOperationalCapture: true,
+  enableCompactionCapture: false,
+  enableSubagentCapture: false,
+  defaultNamespace: "default",
+});
+
+for (const toolName of [
+  "noldomem_recall",
+  "noldomem_store",
+  "noldomem_pin",
+  "plugin:noldomem_recall",
+  "noldomem/noldomem_store",
+  "memory.noldomem_pin",
+]) {
+  await handler({ toolName, params: { command: "git push" }, result: "failed" }, { agentId: "test" });
+}
+if (stores.length !== 0) throw new Error(`self tools captured ${stores.length} times`);
+
+await handler(
+  { toolName: "terminal", params: { command: "git push" }, result: "push completed" },
+  { agentId: "test" },
+);
+if (stores.length !== 1) throw new Error(`normal operational tool captures: ${stores.length}`);
+if (stores[0].source !== "plugin-after-tool-call") throw new Error("unexpected capture source");
+"""
+    subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_docs_keep_compaction_capture_on_openclaw_520_timeout_default():
