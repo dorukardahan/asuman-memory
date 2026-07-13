@@ -103,50 +103,86 @@ function shouldTriggerRecall(text) {
 }
 
 const SECRET_PATTERNS = [
-  /\b(?:api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*[^\\s,;]+/gi,
+  /((?:["'])?(?:api[_-]?key|token|secret|password|passwd|pwd)(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /\bsk-[A-Za-z0-9_-]{12,}/g,
 ];
 
 const OPERATIONAL_TOOL_PATTERNS = [
   /\bsystemctl\b/i,
-  /\bdocker(?:\\s+compose)?\b/i,
-  /\bgit\\s+(?:commit|merge|push|pull|tag|checkout|switch)\b/i,
-  /\b(openclaw|clawhub)\\s+(?:update|plugins|hooks|install|publish)\b/i,
-  /\b(?:npm|pnpm|yarn|pip|uv|apt)\\s+(?:install|add|update|upgrade)\b/i,
-  /\\b(error|failed|traceback|exception|timeout|oom|sigkill)\\b/i,
+  /\bdocker(?:\s+compose)?\b/i,
+  /\bgit\s+(?:commit|merge|push|pull|tag|checkout|switch)\b/i,
+  /\b(openclaw|clawhub)\s+(?:update|plugins|hooks|install|publish)\b/i,
+  /\b(?:npm|pnpm|yarn|pip|uv|apt)\s+(?:install|add|update|upgrade)\b/i,
+  /\b(error|failed|traceback|exception|timeout|oom|sigkill)\b/i,
 ];
 
-const NOLDOMEM_TOOL_NAME_RE = /(?:^|[/:.])noldomem_(?:recall|store|pin)$/;
+// Canonical ids plus the qualification forms known to be emitted by OpenClaw.
+// This is deliberately explicit: suffix matching suppresses unrelated plugins.
+const NOLDOMEM_TOOL_NAMES = new Set([
+  "noldomem_recall", "noldomem_store", "noldomem_pin",
+  "plugin:noldomem_recall", "plugin:noldomem_store", "plugin:noldomem_pin",
+  "noldomem/noldomem_recall", "noldomem/noldomem_store", "noldomem/noldomem_pin",
+  "memory.noldomem_recall", "memory.noldomem_store", "memory.noldomem_pin",
+]);
 
 function isNoldoMemToolName(toolName) {
-  return typeof toolName === "string" && NOLDOMEM_TOOL_NAME_RE.test(toolName.trim());
+  return typeof toolName === "string" && NOLDOMEM_TOOL_NAMES.has(toolName.trim().toLowerCase());
 }
 
 function redactOperationalText(text) {
   let out = String(text || "");
-  for (const pattern of SECRET_PATTERNS) {
-    out = out.replace(pattern, (match) => {
-      const prefix = match.split(/[:=]/, 1)[0] || "secret";
-      return `${prefix}=<redacted>`;
-    });
-  }
+  out = out.replace(SECRET_PATTERNS[0], (_match, prefix) => `${prefix}<redacted>`);
+  for (const pattern of SECRET_PATTERNS.slice(1)) out = out.replace(pattern, "<redacted>");
   return out;
+}
+
+function sanitizeStructuredValue(value, active = new WeakSet()) {
+  if (typeof value === "string") {
+    const candidate = value.trim();
+    if (!((candidate.startsWith("{") && candidate.endsWith("}")) ||
+          (candidate.startsWith("[") && candidate.endsWith("]")))) return value;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!Array.isArray(parsed) &&
+          (parsed === null || Object.getPrototypeOf(parsed) !== Object.prototype)) return value;
+      return JSON.stringify(sanitizeStructuredValue(parsed, active));
+    } catch {
+      return value;
+    }
+  }
+  if (value == null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value !== "object") return "<redacted>";
+  if (active.has(value)) return "<redacted>";
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return "<redacted>";
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => sanitizeStructuredValue(item, active));
+    }
+    const sanitized = {};
+    for (const [key, item] of Object.entries(value)) {
+      sanitized[key] = /^(?:api[_-]?key|token|secret|password|passwd|pwd)$/i.test(key)
+        ? "<redacted>"
+        : sanitizeStructuredValue(item, active);
+    }
+    return sanitized;
+  } finally {
+    active.delete(value);
+  }
 }
 
 function toCompactText(value, maxChars = 1200) {
   if (value == null) return "";
   let text = "";
-  if (typeof value === "string") {
-    text = value;
-  } else {
-    try {
-      text = JSON.stringify(value);
-    } catch {
-      text = String(value);
-    }
+  try {
+    const sanitized = sanitizeStructuredValue(value);
+    text = typeof sanitized === "string" ? sanitized : JSON.stringify(sanitized);
+  } catch {
+    text = "<redacted>";
   }
-  text = redactOperationalText(text).replace(/\\s+/g, " ").trim();
+  text = redactOperationalText(text).replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
 }
 
