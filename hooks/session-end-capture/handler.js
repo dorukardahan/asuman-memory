@@ -324,12 +324,15 @@ function detectUserMood(messages) {
   return "neutral";
 }
 
-function extractUnfinishedWork(messages) {
+export function extractUnfinishedWork(messages) {
   const items = [];
-  // Look for TODO-like patterns in assistant messages
+  // Require a line-level task marker; ordinary words such as "kalan" and
+  // "remaining" are not enough to make prose actionable.
   const assistantMsgs = messages.filter((m) => m.role === "assistant");
   for (const msg of assistantMsgs.slice(-5)) {
-    const todoMatches = msg.text.match(/(?:- \[ \]|TODO|bekliyor|kalan|unfinished|remaining)[^\n]{5,80}/gi);
+    const todoMatches = msg.text.match(
+      /^[ \t]*(?:[-*][ \t]+\[[ \t]\]|(?:TODO|FIXME)[ \t]*:)[ \t]+[^\n]{5,80}/gim
+    );
     if (todoMatches) items.push(...todoMatches.map((m) => m.trim().slice(0, 150)));
   }
   return items.slice(0, 5);

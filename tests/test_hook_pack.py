@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 VALID_MEMORY_TYPES = {"fact", "preference", "rule", "conversation", "lesson", "other"}
@@ -70,3 +72,37 @@ def test_post_response_memory_writes_use_bounded_background_queue():
     for source in hook_sources.values():
         assert "await fetch(`${MEMORY_API}/store`" not in source
     assert "Promise.allSettled(storePromises)" not in hook_sources["claim-scanner"]
+
+
+def test_session_end_todo_scanner_requires_structural_markers(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    script = """
+import { extractUnfinishedWork } from "./hooks/session-end-capture/handler.js";
+
+const ordinaryProse = extractUnfinishedWork([
+  { role: "assistant", text: "Kalan işleri bitirdim; başka bir işlem gerekmiyor." },
+  { role: "assistant", text: "Bu yanıt hâlâ onay bekliyor ama bir görev listesi değil." },
+  { role: "assistant", text: "The remaining time is short, so the explanation is concise." },
+  { role: "assistant", text: "The unfinished sentence is quoted only as an example." },
+]);
+if (ordinaryProse.length !== 0) {
+  throw new Error(`ordinary prose was captured: ${JSON.stringify(ordinaryProse)}`);
+}
+
+const actionableItems = extractUnfinishedWork([
+  { role: "assistant", text: "Tamamlananları özetledim.\\n- [ ] bu işi yap\\nTODO: refactor search" },
+]);
+const expected = ["- [ ] bu işi yap", "TODO: refactor search"];
+if (JSON.stringify(actionableItems) !== JSON.stringify(expected)) {
+  throw new Error(`actionable items were not captured: ${JSON.stringify(actionableItems)}`);
+}
+"""
+
+    subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=repo_root,
+        env={"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
