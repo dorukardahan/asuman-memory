@@ -90,9 +90,17 @@ if (ordinaryProse.length !== 0) {
 }
 
 const actionableItems = extractUnfinishedWork([
-  { role: "assistant", text: "Tamamlananları özetledim.\\n- [ ] bu işi yap\\nTODO: refactor search" },
+  {
+    role: "assistant",
+    text: "Tamamlananları özetledim.\\n- [ ] bu işi yap\\nTODO: refactor search\\nTODO implement search\\nFIXME tighten timeout",
+  },
 ]);
-const expected = ["- [ ] bu işi yap", "TODO: refactor search"];
+const expected = [
+  "- [ ] bu işi yap",
+  "TODO: refactor search",
+  "TODO implement search",
+  "FIXME tighten timeout",
+];
 if (JSON.stringify(actionableItems) !== JSON.stringify(expected)) {
   throw new Error(`actionable items were not captured: ${JSON.stringify(actionableItems)}`);
 }
