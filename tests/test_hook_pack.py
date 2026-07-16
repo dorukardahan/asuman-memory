@@ -124,6 +124,22 @@ const expectedNumbered = [
 if (JSON.stringify(numberedItems) !== JSON.stringify(expectedNumbered)) {
   throw new Error(`numbered TODO items were not captured: ${JSON.stringify(numberedItems)}`);
 }
+
+const labeledItems = extractUnfinishedWork([
+  {
+    role: "assistant",
+    text: "Remaining: run the migration\\nUnfinished: wire the API\\nKalan: testleri çalıştır\\nBekliyor: review sonucu",
+  },
+]);
+const expectedLabels = [
+  "Remaining: run the migration",
+  "Unfinished: wire the API",
+  "Kalan: testleri çalıştır",
+  "Bekliyor: review sonucu",
+];
+if (JSON.stringify(labeledItems) !== JSON.stringify(expectedLabels)) {
+  throw new Error(`structural handoff labels were not captured: ${JSON.stringify(labeledItems)}`);
+}
 """
 
     subprocess.run(
