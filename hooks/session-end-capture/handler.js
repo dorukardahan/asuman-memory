@@ -331,7 +331,7 @@ export function extractUnfinishedWork(messages) {
   const assistantMsgs = messages.filter((m) => m.role === "assistant");
   for (const msg of assistantMsgs.slice(-5)) {
     const todoMatches = msg.text.match(
-      /^[ \t]*(?:(?:[-*][ \t]+)?(?:TODO|FIXME)(?:[ \t]*:)?|[-*][ \t]+\[[ \t]\])[ \t]+[^\n]{5,80}/gim
+      /^[ \t]*(?:(?:(?:[-*+]|[0-9]{1,3}[.)])[ \t]+)?(?:TODO|FIXME)(?:[ \t]*:)?|[-*][ \t]+\[[ \t]\])[ \t]+[^\n]{5,80}/gim
     );
     if (todoMatches) items.push(...todoMatches.map((m) => m.trim().slice(0, 150)));
   }

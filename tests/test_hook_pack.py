@@ -112,6 +112,18 @@ const expectedBullets = ["- TODO: run the migration", "* FIXME add retry coverag
 if (JSON.stringify(bulletItems) !== JSON.stringify(expectedBullets)) {
   throw new Error(`bullet TODO items were not captured: ${JSON.stringify(bulletItems)}`);
 }
+
+const numberedItems = extractUnfinishedWork([
+  { role: "assistant", text: "1. TODO: run the migration\\n2) FIXME add retry coverage\\n+ TODO verify backup" },
+]);
+const expectedNumbered = [
+  "1. TODO: run the migration",
+  "2) FIXME add retry coverage",
+  "+ TODO verify backup",
+];
+if (JSON.stringify(numberedItems) !== JSON.stringify(expectedNumbered)) {
+  throw new Error(`numbered TODO items were not captured: ${JSON.stringify(numberedItems)}`);
+}
 """
 
     subprocess.run(
