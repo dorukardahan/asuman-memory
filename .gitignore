@@ -19,4 +19,5 @@ env/
 BUILD-PLAN.md
 logs/
 hooks.bak.*/
+*.bak*
 .DS_Store
