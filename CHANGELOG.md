@@ -6,6 +6,18 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.27.15] - 2026-07-20
+
+### Fixed
+- Prevent the session-end TODO scanner from treating ordinary conversational words as actionable follow-ups.
+- Remove a duplicated project-description phrase from package metadata.
+
+### Changed
+- Align Ruff linting with the declared Python 3.10 compatibility floor.
+
+### Internal
+- Remove a stale backup script artifact from the public source tree.
+
 ## [1.27.14] - 2026-07-11
 
 ### Fixed
