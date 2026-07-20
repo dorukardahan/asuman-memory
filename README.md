@@ -27,6 +27,16 @@ OpenClaw's native memory (`memorySearch`) is basic — keyword search, no decay,
 | External dependencies | None | Embedding API (cloud or local) |
 | Embedding options | Cloud only | Cloud (OpenRouter/OpenAI) or self-hosted |
 
+## Choose your integration
+
+NoldoMem supports both OpenClaw and Hermes Agent:
+
+- **OpenClaw:** Continue with the [OpenClaw Quick Start](#quick-start-openclaw) below.
+- **Hermes Agent:** Start with the [Hermes integration guide](./docs/hermes-integration.md)
+  for architecture and runtime guidance, then use the
+  [Hermes adapter README](./adapters/hermes/noldomem/README.md) for adapter
+  installation and configuration.
+
 ## Quick Start (OpenClaw)
 
 ### Step 1: Install NoldoMem
