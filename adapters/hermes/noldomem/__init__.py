@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import signal
 import threading
 import time
 import urllib.error
 import urllib.request
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +35,11 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 # Truncate well below that to leave room for safe UTF-8 boundaries.
 RECALL_QUERY_MAX_CHARS = 1950
 DEFAULT_TIMEOUT_SECONDS = 8.0
+DEFAULT_RECALL_CACHE_TTL_SECONDS = 300.0
+DEFAULT_RECALL_CACHE_MAX_ENTRIES = 128
+READINESS_MAX_BYTES = 16 * 1024
+READINESS_MAX_TIMEOUT_SECONDS = 2.0
+SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -48,6 +56,8 @@ class NoldoMemConfig:
     sync_turns_enabled: bool = False
     tools_enabled: bool = True
     non_primary_writes_enabled: bool = False
+    recall_cache_ttl_seconds: float = DEFAULT_RECALL_CACHE_TTL_SECONDS
+    recall_cache_max_entries: int = DEFAULT_RECALL_CACHE_MAX_ENTRIES
 
 
 class NoldoMemHTTPClient:
@@ -115,6 +125,8 @@ def _as_float(value: Any, default: float, *, minimum: float = 0.1, maximum: floa
         parsed = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(parsed):
+        return default
     return max(minimum, min(maximum, parsed))
 
 
@@ -144,6 +156,18 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max(0, max_chars - 15)].rstrip() + " ...[truncated]"
 
 
+class _ReadinessPayloadTooLarge(ValueError):
+    pass
+
+
+class _ReadinessDeadlineExceeded(TimeoutError):
+    pass
+
+
+class _ReadinessDeadlineUnavailable(RuntimeError):
+    pass
+
+
 class NoldoMemProvider(MemoryProvider):
     @property
     def name(self) -> str:
@@ -155,9 +179,12 @@ class NoldoMemProvider(MemoryProvider):
         self._session_id = ""
         self._initialized = False
         self._writes_enabled = False
-        self._cache: Dict[str, tuple[float, str]] = {}
-        self._threads: List[threading.Thread] = []
+        self._cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
+        self._session_generation = 0
+        self._closing = False
+        self._shutdown_deadline: Optional[float] = None
         self._lock = threading.Lock()
+        self._operation_lock = threading.Lock()
 
     def load_config(self, hermes_home: Optional[str] = None, **overrides: Any) -> NoldoMemConfig:
         home = Path(hermes_home).expanduser() if hermes_home else _default_hermes_home()
@@ -220,6 +247,18 @@ class NoldoMemProvider(MemoryProvider):
                 os.environ.get("NOLDOMEM_NON_PRIMARY_WRITES_ENABLED") or raw.get("non_primary_writes_enabled"),
                 False,
             ),
+            recall_cache_ttl_seconds=_as_float(
+                os.environ.get("NOLDOMEM_RECALL_CACHE_TTL_SECONDS") or raw.get("recall_cache_ttl_seconds"),
+                DEFAULT_RECALL_CACHE_TTL_SECONDS,
+                minimum=0.1,
+                maximum=3600.0,
+            ),
+            recall_cache_max_entries=_as_int(
+                os.environ.get("NOLDOMEM_RECALL_CACHE_MAX_ENTRIES") or raw.get("recall_cache_max_entries"),
+                DEFAULT_RECALL_CACHE_MAX_ENTRIES,
+                minimum=1,
+                maximum=4096,
+            ),
         )
 
     def is_available(self) -> bool:
@@ -234,7 +273,10 @@ class NoldoMemProvider(MemoryProvider):
             cfg.agent = str(agent_override)
         self._config = cfg
         self._client = NoldoMemHTTPClient(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
-        self._session_id = session_id
+        with self._lock:
+            self._session_id = session_id
+            self._session_generation += 1
+            self._cache.clear()
         self._initialized = bool(cfg.api_key)
 
         agent_context = str(kwargs.get("agent_context") or "primary")
@@ -256,11 +298,11 @@ class NoldoMemProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not (self._initialized and self._config.prefetch_enabled and query.strip()):
             return ""
-        key = self._cache_key(query, session_id)
-        with self._lock:
-            cached = self._cache.get(key)
-        if cached and time.time() - cached[0] < 300:
-            return cached[1]
+        effective_session_id, _ = self._session_snapshot(session_id)
+        key = self._cache_key(query, effective_session_id)
+        cached = self._cache_get(key)
+        if cached is not None:
+            return cached
         if not self._config.sync_prefetch_on_miss:
             return ""
         return self._recall_context(query, session_id=session_id)
@@ -268,13 +310,7 @@ class NoldoMemProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if not (self._initialized and self._config.prefetch_enabled and query.strip()):
             return
-        thread = threading.Thread(
-            target=self._recall_context,
-            kwargs={"query": query, "session_id": session_id},
-            daemon=True,
-        )
-        thread.start()
-        self._threads.append(thread)
+        self._recall_context(query, session_id=session_id)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if not (self._initialized and self._writes_enabled and user_content and assistant_content):
@@ -291,9 +327,7 @@ class NoldoMemProvider(MemoryProvider):
                 "source": "hermes-sync-turn",
             }
         )
-        thread = threading.Thread(target=self._safe_store, args=(body,), daemon=True)
-        thread.start()
-        self._threads.append(thread)
+        self._safe_store(body)
 
     def on_session_switch(
         self,
@@ -305,9 +339,13 @@ class NoldoMemProvider(MemoryProvider):
     ) -> None:
         if not new_session_id:
             return
-        self._session_id = new_session_id
-        if reset:
-            with self._lock:
+        reason = str(kwargs.get("reason") or "").strip().lower()
+        rewound = kwargs.get("rewound") is True
+        with self._lock:
+            previous_session_id = self._session_id
+            self._session_id = new_session_id
+            if reset or rewound or new_session_id != previous_session_id or reason in {"compression", "rewind"}:
+                self._session_generation += 1
                 self._cache.clear()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -398,23 +436,105 @@ class NoldoMemProvider(MemoryProvider):
     ) -> None:
         if not (self._initialized and content.strip() and self._client):
             return
-        memory_type = "preference" if target == "user" else "fact"
-        body = self._base_body()
-        body.update(
-            {
-                "text": content.strip(),
-                "memory_type": memory_type,
-                "category": "user" if target == "user" else "other",
-                "source": f"hermes-built-in-memory-{action}",
-            }
-        )
-        thread = threading.Thread(target=self._safe_store, args=(body,), daemon=True)
-        thread.start()
-        self._threads.append(thread)
+        with self._operation_lock:
+            with self._lock:
+                if self._closing:
+                    return
+            memory_type = "preference" if target == "user" else "fact"
+            body = self._base_body()
+            body.update(
+                {
+                    "text": content.strip(),
+                    "memory_type": memory_type,
+                    "category": "user" if target == "user" else "other",
+                    "source": f"hermes-built-in-memory-{action}",
+                }
+            )
+            self._safe_store(body)
 
     def shutdown(self) -> None:
-        for thread in list(self._threads):
-            thread.join(timeout=0.2)
+        started_at = time.monotonic()
+        with self._lock:
+            if not self._closing:
+                self._closing = True
+                self._shutdown_deadline = started_at + SHUTDOWN_TIMEOUT_SECONDS
+            deadline = self._shutdown_deadline or started_at
+
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = self._operation_lock.acquire(timeout=remaining)
+        if acquired:
+            self._operation_lock.release()
+
+    def probe_readiness(self, timeout_seconds: float = READINESS_MAX_TIMEOUT_SECONDS) -> Dict[str, Any]:
+        """Perform one explicit bounded health read and return allowlisted metadata."""
+        cfg = self.load_config()
+        if not (cfg.base_url and cfg.api_key):
+            return {
+                "ready": False,
+                "status": "unconfigured",
+                "storage_ok": None,
+                "embedding_ok": None,
+                "uptime_seconds": None,
+                "error_type": "",
+            }
+
+        timeout = _as_float(
+            timeout_seconds,
+            READINESS_MAX_TIMEOUT_SECONDS,
+            minimum=0.1,
+            maximum=READINESS_MAX_TIMEOUT_SECONDS,
+        )
+        try:
+            previous_signal_handler = self._install_readiness_deadline(timeout)
+        except _ReadinessDeadlineUnavailable as exc:
+            return self._readiness_failure(exc)
+
+        try:
+            request = urllib.request.Request(cfg.base_url.rstrip("/") + "/v1/health", method="GET")
+            response = urllib.request.urlopen(request, timeout=timeout)
+            try:
+                raw = response.read(READINESS_MAX_BYTES + 1)
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+            if len(raw) > READINESS_MAX_BYTES:
+                raise _ReadinessPayloadTooLarge()
+            payload = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError()
+            status = payload.get("status")
+            if status not in {"ok", "degraded", "down"}:
+                raise ValueError()
+            checks = payload.get("checks")
+            if not isinstance(checks, dict):
+                checks = {}
+            storage_ok = checks.get("storage")
+            embedding_ok = checks.get("embedding")
+            uptime_seconds = payload.get("uptime_seconds")
+            if not isinstance(storage_ok, bool):
+                storage_ok = None
+            if not isinstance(embedding_ok, bool):
+                embedding_ok = None
+            if (
+                isinstance(uptime_seconds, bool)
+                or not isinstance(uptime_seconds, (int, float))
+                or not math.isfinite(uptime_seconds)
+            ):
+                uptime_seconds = None
+            return {
+                "ready": status == "ok",
+                "status": status,
+                "storage_ok": storage_ok,
+                "embedding_ok": embedding_ok,
+                "uptime_seconds": uptime_seconds,
+                "error_type": "",
+            }
+        except Exception as exc:
+            return self._readiness_failure(exc)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, previous_signal_handler)
 
     def _base_body(self, *, session_id: str = "") -> Dict[str, Any]:
         body = {
@@ -437,16 +557,43 @@ class NoldoMemProvider(MemoryProvider):
         if not self._client:
             return ""
         try:
-            body = self._base_body(session_id=session_id)
+            effective_session_id, session_generation = self._session_snapshot(session_id)
+            body = self._base_body(session_id=effective_session_id)
             body.update({"query": _truncate(query, RECALL_QUERY_MAX_CHARS), "limit": self._config.recall_limit})
             data = self._client.recall(body)
             context = self._format_recall(data)
-            key = self._cache_key(query, session_id)
-            with self._lock:
-                self._cache[key] = (time.time(), context)
+            key = self._cache_key(query, effective_session_id)
+            self._cache_put(key, context, session_generation=session_generation)
             return context
         except Exception:
             return ""
+
+    def _cache_get(self, key: str) -> Optional[str]:
+        now = time.monotonic()
+        with self._lock:
+            self._prune_cache_locked(now)
+            cached = self._cache.get(key)
+            if cached is None:
+                return None
+            self._cache.move_to_end(key)
+            return cached[1]
+
+    def _cache_put(self, key: str, context: str, *, session_generation: int) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if session_generation != self._session_generation:
+                return
+            self._prune_cache_locked(now)
+            self._cache[key] = (now, context)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._config.recall_cache_max_entries:
+                self._cache.popitem(last=False)
+
+    def _prune_cache_locked(self, now: float) -> None:
+        ttl = self._config.recall_cache_ttl_seconds
+        expired = [key for key, (created_at, _) in self._cache.items() if now - created_at >= ttl]
+        for key in expired:
+            self._cache.pop(key, None)
 
     def _format_recall(self, data: Dict[str, Any]) -> str:
         results = data.get("results") or data.get("memories") or []
@@ -471,7 +618,69 @@ class NoldoMemProvider(MemoryProvider):
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def _cache_key(self, query: str, session_id: str) -> str:
-        return f"{session_id or self._session_id}:{query.strip().lower()[:500]}"
+        normalized_query = _truncate(query.strip(), RECALL_QUERY_MAX_CHARS).lower()
+        return f"{session_id}:{normalized_query}"
+
+    def _session_snapshot(self, session_id: str) -> tuple[str, int]:
+        with self._lock:
+            return session_id or self._session_id, self._session_generation
+
+    @staticmethod
+    def _readiness_failure(exc: Exception) -> Dict[str, Any]:
+        if isinstance(exc, _ReadinessDeadlineExceeded):
+            error_type = "DeadlineExceeded"
+        elif isinstance(exc, _ReadinessDeadlineUnavailable):
+            error_type = "DeadlineUnavailable"
+        elif isinstance(exc, _ReadinessPayloadTooLarge):
+            error_type = "ResponseTooLarge"
+        elif isinstance(exc, urllib.error.HTTPError):
+            error_type = "HTTPError"
+        elif isinstance(exc, urllib.error.URLError):
+            error_type = "URLError"
+        elif isinstance(exc, TimeoutError):
+            error_type = "TimeoutError"
+        elif isinstance(exc, OSError):
+            error_type = "OSError"
+        elif isinstance(exc, (UnicodeDecodeError, ValueError)):
+            error_type = "InvalidResponse"
+        else:
+            error_type = "ReadinessError"
+        return {
+            "ready": False,
+            "status": "unavailable",
+            "storage_ok": None,
+            "embedding_ok": None,
+            "uptime_seconds": None,
+            "error_type": error_type,
+        }
+
+    @staticmethod
+    def _install_readiness_deadline(timeout_seconds: float) -> Any:
+        if (
+            threading.current_thread() is not threading.main_thread()
+            or not hasattr(signal, "SIGALRM")
+            or not hasattr(signal, "ITIMER_REAL")
+            or not hasattr(signal, "setitimer")
+            or not hasattr(signal, "getitimer")
+        ):
+            raise _ReadinessDeadlineUnavailable()
+
+        current_timer = signal.getitimer(signal.ITIMER_REAL)
+        if current_timer[0] > 0.0:
+            raise _ReadinessDeadlineUnavailable()
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+
+        def deadline_exceeded(signum: int, frame: Any) -> None:
+            raise _ReadinessDeadlineExceeded()
+
+        try:
+            signal.signal(signal.SIGALRM, deadline_exceeded)
+            signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        except Exception as exc:
+            signal.signal(signal.SIGALRM, previous_handler)
+            raise _ReadinessDeadlineUnavailable() from exc
+        return previous_handler
 
     def _memory_type(self, raw: Any) -> str:
         value = str(raw or "other").strip().lower()
