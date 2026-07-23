@@ -1486,6 +1486,37 @@ def test_live_probe_omits_non_finite_uptime(monkeypatch, tmp_path):
 
 
 @requires_posix_deadline
+def test_readiness_probe_uses_initialized_config_not_env(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    captured = {}
+
+    class LiveResponse:
+        def read(self, size=-1):
+            return json.dumps({"status": "ok"}).encode("utf-8")
+
+        def close(self):
+            pass
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        return LiveResponse()
+
+    monkeypatch.setattr("noldomem.urllib.request.urlopen", fake_urlopen)
+
+    # Simulate Hermes calling probe_readiness after initialize with a
+    # hermes_home that differs from the env default. probe_readiness must
+    # use the published config, not reload from a stale env path.
+    monkeypatch.setenv("NOLDOMEM_BASE_URL", "http://env-default-wrong-endpoint.invalid")
+    monkeypatch.setenv("HERMES_HOME", "/nonexistent-env-home")
+
+    health = provider.probe_readiness()
+    assert health["ready"] is True
+    assert captured["url"].startswith("http://127.0.0.1:8787")
+    assert "env-default-wrong-endpoint" not in captured["url"]
+
+
+@requires_posix_deadline
 def test_doctor_live_probe_redacts_raw_exception_text(monkeypatch, tmp_path, capsys):
     key_file = tmp_path / "key"
     key_file.write_text("test-key", encoding="utf-8")
@@ -1578,7 +1609,8 @@ def test_live_probe_fails_closed_when_outer_deadline_cannot_be_installed(monkeyp
 @requires_posix_deadline
 def test_live_probe_restores_outer_deadline_when_request_construction_fails(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
-    monkeypatch.setenv("NOLDOMEM_BASE_URL", "http://[invalid")
+    with provider._lock:
+        provider._config.base_url = "http://[invalid"
     previous_handler = signal.getsignal(signal.SIGALRM)
     health = None
     raised = None

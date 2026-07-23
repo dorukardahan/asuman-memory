@@ -577,7 +577,7 @@ class NoldoMemProvider(MemoryProvider):
 
     def probe_readiness(self, timeout_seconds: float = READINESS_MAX_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """Perform one explicit bounded health read and return allowlisted metadata."""
-        cfg = self.load_config()
+        cfg = self._active_or_fresh_config()
         if not (cfg.base_url and cfg.api_key):
             return {
                 "ready": False,
@@ -648,6 +648,12 @@ class NoldoMemProvider(MemoryProvider):
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0.0)
             signal.signal(signal.SIGALRM, previous_signal_handler)
+
+    def _active_or_fresh_config(self) -> NoldoMemConfig:
+        with self._lock:
+            if self._initialized and not self._closing:
+                return self._config
+        return self.load_config()
 
     def _base_body_snapshot(
         self,
