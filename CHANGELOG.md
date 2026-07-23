@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Remove provider-owned background workers from the Hermes adapter, relying on the Hermes v0.19 host executor for turn sync and queued prefetch work while keeping inline memory-write hooks synchronous.
+- Bound the Hermes recall cache with configurable TTL/LRU limits and invalidate it across session and compaction boundaries.
+- Keep Hermes adapter discovery network-free and make live readiness an explicit, bounded, privacy-safe doctor option.
+- Isolate Hermes recall cache entries by the full effective request scope, discard recall/tool results that finish after close, reject late backend work with a bounded provider-local shutdown wait, and match Hermes v0.19 context sanitization semantics.
+- Reset lifecycle gates on clean provider reinitialization while rejecting reuse until any timed-out operation from the previous lifecycle has drained.
+- Bind Hermes request bodies and network admission to the same lifecycle generation so preempted old-session work cannot run against a reinitialized client.
+- Use the active published config for readiness probes so a provider initialized with a non-default profile probes the correct endpoint.
+- Register host-lane recall and write callbacks before request snapshots so shutdown cannot miss preempted old-lifecycle work.
+- Bind host-lane admission to the current session generation so a concurrent session switch cannot retarget old callback content.
+
 ## [1.27.15] - 2026-07-20
 
 ### Fixed

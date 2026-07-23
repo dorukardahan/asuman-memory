@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
+import signal
 import threading
 import time
 import urllib.error
 import urllib.request
 
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -22,8 +27,21 @@ except Exception:  # pragma: no cover - used only outside Hermes tests
 try:
     from agent.memory_manager import sanitize_context
 except Exception:  # pragma: no cover - Hermes supplies this at runtime
+    _FENCE_TAG_RE = re.compile(r"</?\s*memory-context\s*>", re.IGNORECASE)
+    _INTERNAL_CONTEXT_RE = re.compile(
+        r"<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>",
+        re.IGNORECASE,
+    )
+    _INTERNAL_NOTE_RE = re.compile(
+        r"\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*"
+        r"Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*",
+        re.IGNORECASE,
+    )
+
     def sanitize_context(text: str) -> str:
-        return text.replace("<memory-context>", "").replace("</memory-context>", "")
+        text = _INTERNAL_CONTEXT_RE.sub("", text)
+        text = _INTERNAL_NOTE_RE.sub("", text)
+        return _FENCE_TAG_RE.sub("", text)
 
 
 VALID_MEMORY_TYPES = {"fact", "preference", "rule", "conversation", "lesson", "other"}
@@ -32,6 +50,11 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 # Truncate well below that to leave room for safe UTF-8 boundaries.
 RECALL_QUERY_MAX_CHARS = 1950
 DEFAULT_TIMEOUT_SECONDS = 8.0
+DEFAULT_RECALL_CACHE_TTL_SECONDS = 300.0
+DEFAULT_RECALL_CACHE_MAX_ENTRIES = 128
+READINESS_MAX_BYTES = 16 * 1024
+READINESS_MAX_TIMEOUT_SECONDS = 2.0
+SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -48,6 +71,41 @@ class NoldoMemConfig:
     sync_turns_enabled: bool = False
     tools_enabled: bool = True
     non_primary_writes_enabled: bool = False
+    recall_cache_ttl_seconds: float = DEFAULT_RECALL_CACHE_TTL_SECONDS
+    recall_cache_max_entries: int = DEFAULT_RECALL_CACHE_MAX_ENTRIES
+
+
+@dataclass(frozen=True)
+class _RecallSnapshot:
+    agent: str
+    namespace: str
+    limit: int
+    max_chars: int
+    session_id: str
+    query: str
+    session_generation: int
+
+    @property
+    def cache_key(self) -> tuple[str, str, int, int, str, str]:
+        return (
+            self.agent,
+            self.namespace,
+            self.limit,
+            self.max_chars,
+            self.session_id,
+            self.query,
+        )
+
+    def request_body(self) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "agent": self.agent,
+            "namespace": self.namespace,
+            "query": self.query,
+            "limit": self.limit,
+        }
+        if self.session_id:
+            body["session_id"] = self.session_id
+        return body
 
 
 class NoldoMemHTTPClient:
@@ -115,6 +173,8 @@ def _as_float(value: Any, default: float, *, minimum: float = 0.1, maximum: floa
         parsed = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(parsed):
+        return default
     return max(minimum, min(maximum, parsed))
 
 
@@ -144,6 +204,22 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max(0, max_chars - 15)].rstrip() + " ...[truncated]"
 
 
+class _ReadinessPayloadTooLarge(ValueError):
+    pass
+
+
+class _ReadinessDeadlineExceeded(TimeoutError):
+    pass
+
+
+class _ReadinessDeadlineUnavailable(RuntimeError):
+    pass
+
+
+class _ProviderClosed(RuntimeError):
+    pass
+
+
 class NoldoMemProvider(MemoryProvider):
     @property
     def name(self) -> str:
@@ -155,9 +231,17 @@ class NoldoMemProvider(MemoryProvider):
         self._session_id = ""
         self._initialized = False
         self._writes_enabled = False
-        self._cache: Dict[str, tuple[float, str]] = {}
-        self._threads: List[threading.Thread] = []
+        self._cache: OrderedDict[
+            tuple[str, str, int, int, str, str],
+            tuple[float, str],
+        ] = OrderedDict()
+        self._session_generation = 0
+        self._closing = False
+        self._shutdown_deadline: Optional[float] = None
         self._lock = threading.Lock()
+        self._operations_drained = threading.Condition(self._lock)
+        self._active_operations: Dict[int, float] = {}
+        self._next_operation_id = 0
 
     def load_config(self, hermes_home: Optional[str] = None, **overrides: Any) -> NoldoMemConfig:
         home = Path(hermes_home).expanduser() if hermes_home else _default_hermes_home()
@@ -220,27 +304,53 @@ class NoldoMemProvider(MemoryProvider):
                 os.environ.get("NOLDOMEM_NON_PRIMARY_WRITES_ENABLED") or raw.get("non_primary_writes_enabled"),
                 False,
             ),
+            recall_cache_ttl_seconds=_as_float(
+                os.environ.get("NOLDOMEM_RECALL_CACHE_TTL_SECONDS") or raw.get("recall_cache_ttl_seconds"),
+                DEFAULT_RECALL_CACHE_TTL_SECONDS,
+                minimum=0.1,
+                maximum=3600.0,
+            ),
+            recall_cache_max_entries=_as_int(
+                os.environ.get("NOLDOMEM_RECALL_CACHE_MAX_ENTRIES") or raw.get("recall_cache_max_entries"),
+                DEFAULT_RECALL_CACHE_MAX_ENTRIES,
+                minimum=1,
+                maximum=4096,
+            ),
         )
 
     def is_available(self) -> bool:
         cfg = self.load_config()
-        self._config = cfg
-        return bool(cfg.base_url and cfg.api_key)
+        configured = bool(cfg.base_url and cfg.api_key)
+        with self._lock:
+            # Discovery publishes configuration only before initialization.
+            # Re-checking availability on a live provider must not hot-swap
+            # recall scope underneath in-flight/cache validation.
+            if not self._initialized and not self._closing:
+                self._config = cfg
+        return configured
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         agent_override = kwargs.get("agent_identity")
         cfg = self.load_config(kwargs.get("hermes_home"))
         if cfg.agent in {"", "auto"} and agent_override:
             cfg.agent = str(agent_override)
-        self._config = cfg
-        self._client = NoldoMemHTTPClient(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
-        self._session_id = session_id
-        self._initialized = bool(cfg.api_key)
-
+        client = NoldoMemHTTPClient(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
         agent_context = str(kwargs.get("agent_context") or "primary")
-        self._writes_enabled = cfg.sync_turns_enabled and (
+        writes_enabled = cfg.sync_turns_enabled and (
             agent_context == "primary" or cfg.non_primary_writes_enabled
         )
+        with self._lock:
+            if self._active_operations:
+                raise RuntimeError("cannot initialize while operations are still active")
+            self._closing = False
+            self._shutdown_deadline = None
+            self._config = cfg
+            self._client = client
+            self._session_id = session_id
+            self._session_generation += 1
+            self._cache.clear()
+            self._initialized = bool(cfg.api_key)
+            self._writes_enabled = writes_enabled
 
     def system_prompt_block(self) -> str:
         if not self._initialized:
@@ -254,46 +364,59 @@ class NoldoMemProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not (self._initialized and self._config.prefetch_enabled and query.strip()):
-            return ""
-        key = self._cache_key(query, session_id)
-        with self._lock:
-            cached = self._cache.get(key)
-        if cached and time.time() - cached[0] < 300:
-            return cached[1]
-        if not self._config.sync_prefetch_on_miss:
-            return ""
-        return self._recall_context(query, session_id=session_id)
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
+            if not admitted or not (self._initialized and self._config.prefetch_enabled and query.strip()):
+                return ""
+            snapshot = self._recall_snapshot(
+                query,
+                session_id=session_id,
+                expected_generation=admission_generation,
+            )
+            if snapshot is None:
+                return ""
+            cached = self._cache_get(snapshot.cache_key)
+            if cached is not None:
+                return cached if self._recall_snapshot_is_current(snapshot) else ""
+            if not self._config.sync_prefetch_on_miss:
+                return ""
+            return self._recall_context_from_snapshot(snapshot)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if not (self._initialized and self._config.prefetch_enabled and query.strip()):
-            return
-        thread = threading.Thread(
-            target=self._recall_context,
-            kwargs={"query": query, "session_id": session_id},
-            daemon=True,
-        )
-        thread.start()
-        self._threads.append(thread)
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
+            if not admitted or not (self._initialized and self._config.prefetch_enabled and query.strip()):
+                return
+            self._recall_context(
+                query,
+                session_id=session_id,
+                expected_generation=admission_generation,
+            )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        if not (self._initialized and self._writes_enabled and user_content and assistant_content):
-            return
-        text = _truncate(
-            f"User: {user_content.strip()}\nAssistant: {assistant_content.strip()}",
-            3000,
-        )
-        body = self._base_body(session_id=session_id)
-        body.update(
-            {
-                "text": text,
-                "memory_type": "conversation",
-                "source": "hermes-sync-turn",
-            }
-        )
-        thread = threading.Thread(target=self._safe_store, args=(body,), daemon=True)
-        thread.start()
-        self._threads.append(thread)
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
+            if not admitted or not (
+                self._initialized and self._writes_enabled and user_content and assistant_content
+            ):
+                return
+            request = self._base_body_snapshot(
+                session_id=session_id,
+                require_writes=True,
+                expected_generation=admission_generation,
+            )
+            if request is None:
+                return
+            body, lifecycle_generation = request
+            text = _truncate(
+                f"User: {user_content.strip()}\nAssistant: {assistant_content.strip()}",
+                3000,
+            )
+            body.update(
+                {
+                    "text": text,
+                    "memory_type": "conversation",
+                    "source": "hermes-sync-turn",
+                }
+            )
+            self._safe_store(body, expected_generation=lifecycle_generation)
 
     def on_session_switch(
         self,
@@ -305,9 +428,13 @@ class NoldoMemProvider(MemoryProvider):
     ) -> None:
         if not new_session_id:
             return
-        self._session_id = new_session_id
-        if reset:
-            with self._lock:
+        reason = str(kwargs.get("reason") or "").strip().lower()
+        rewound = kwargs.get("rewound") is True
+        with self._lock:
+            previous_session_id = self._session_id
+            self._session_id = new_session_id
+            if reset or rewound or new_session_id != previous_session_id or reason in {"compression", "rewind"}:
+                self._session_generation += 1
                 self._cache.clear()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -356,34 +483,84 @@ class NoldoMemProvider(MemoryProvider):
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
-        if not self._client:
-            return self._json_error("NoldoMem is not configured")
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
+            if not admitted:
+                return self._network_unavailable_error()
+            return self._handle_registered_tool_call(
+                tool_name,
+                args,
+                admission_generation=admission_generation,
+                **kwargs,
+            )
+
+    def _handle_registered_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        admission_generation: Optional[int],
+        **kwargs: Any,
+    ) -> str:
         try:
             if tool_name == "noldomem_recall":
-                body = self._base_body(session_id=kwargs.get("session_id", ""))
-                body["query"] = _truncate(str(args.get("query") or "").strip(), RECALL_QUERY_MAX_CHARS)
+                request = self._base_body_snapshot(
+                    session_id=kwargs.get("session_id", ""),
+                    expected_generation=admission_generation,
+                )
+                if request is None:
+                    return self._network_unavailable_error(admission_generation)
+                body, lifecycle_generation = request
+                body["query"] = self._request_query(str(args.get("query") or ""))
                 body["limit"] = _as_int(args.get("limit"), self._config.recall_limit, minimum=1, maximum=20)
                 if args.get("namespace"):
                     body["namespace"] = str(args["namespace"])
                 if args.get("memory_type"):
                     body["memory_type"] = self._memory_type(args["memory_type"])
-                return json.dumps({"success": True, "data": self._client.recall(body)}, ensure_ascii=False)
+                with self._network_operation(expected_generation=lifecycle_generation) as client:
+                    if client is None:
+                        return self._network_unavailable_error(lifecycle_generation)
+                    data = client.recall(body)
+                    if not self._network_result_allowed(client, lifecycle_generation):
+                        return self._network_unavailable_error(lifecycle_generation)
+                    return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_store":
-                body = self._base_body(session_id=kwargs.get("session_id", ""))
+                request = self._base_body_snapshot(
+                    session_id=kwargs.get("session_id", ""),
+                    expected_generation=admission_generation,
+                )
+                if request is None:
+                    return self._network_unavailable_error(admission_generation)
+                body, lifecycle_generation = request
                 body["text"] = str(args.get("text") or "").strip()
                 body["memory_type"] = self._memory_type(args.get("memory_type") or "other")
                 body["source"] = str(args.get("source") or "hermes-tool")
                 if args.get("namespace"):
                     body["namespace"] = str(args["namespace"])
-                return json.dumps({"success": True, "data": self._client.store(body)}, ensure_ascii=False)
+                with self._network_operation(expected_generation=lifecycle_generation) as client:
+                    if client is None:
+                        return self._network_unavailable_error(lifecycle_generation)
+                    data = client.store(body)
+                    if not self._network_result_allowed(client, lifecycle_generation):
+                        return self._network_unavailable_error(lifecycle_generation)
+                    return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_pin":
                 memory_id = str(args.get("memory_id") or "").strip()
                 if not memory_id:
                     return self._json_error("memory_id is required")
-                body = {"id": memory_id, "agent": self._config.agent}
-                return json.dumps({"success": True, "data": self._client.pin(body)}, ensure_ascii=False)
+                request = self._base_body_snapshot(expected_generation=admission_generation)
+                if request is None:
+                    return self._network_unavailable_error(admission_generation)
+                base_body, lifecycle_generation = request
+                body = {"id": memory_id, "agent": base_body["agent"]}
+                with self._network_operation(expected_generation=lifecycle_generation) as client:
+                    if client is None:
+                        return self._network_unavailable_error(lifecycle_generation)
+                    data = client.pin(body)
+                    if not self._network_result_allowed(client, lifecycle_generation):
+                        return self._network_unavailable_error(lifecycle_generation)
+                    return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             return self._json_error(f"unknown tool: {tool_name}")
         except Exception as exc:
@@ -396,62 +573,228 @@ class NoldoMemProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if not (self._initialized and content.strip() and self._client):
-            return
-        memory_type = "preference" if target == "user" else "fact"
-        body = self._base_body()
-        body.update(
-            {
-                "text": content.strip(),
-                "memory_type": memory_type,
-                "category": "user" if target == "user" else "other",
-                "source": f"hermes-built-in-memory-{action}",
-            }
-        )
-        thread = threading.Thread(target=self._safe_store, args=(body,), daemon=True)
-        thread.start()
-        self._threads.append(thread)
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
+            if not admitted or not (self._initialized and content.strip() and self._client):
+                return
+            request = self._base_body_snapshot(expected_generation=admission_generation)
+            if request is None:
+                return
+            body, lifecycle_generation = request
+            memory_type = "preference" if target == "user" else "fact"
+            body.update(
+                {
+                    "text": content.strip(),
+                    "memory_type": memory_type,
+                    "category": "user" if target == "user" else "other",
+                    "source": f"hermes-built-in-memory-{action}",
+                }
+            )
+            self._safe_store(body, expected_generation=lifecycle_generation)
 
     def shutdown(self) -> None:
-        for thread in list(self._threads):
-            thread.join(timeout=0.2)
+        started_at = time.monotonic()
+        with self._operations_drained:
+            if not self._closing:
+                self._closing = True
+                oldest_operation_started_at = min(self._active_operations.values(), default=started_at)
+                self._shutdown_deadline = min(
+                    started_at + SHUTDOWN_TIMEOUT_SECONDS,
+                    oldest_operation_started_at + SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            deadline = self._shutdown_deadline or started_at
+            while self._active_operations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._operations_drained.wait(timeout=remaining)
 
-    def _base_body(self, *, session_id: str = "") -> Dict[str, Any]:
-        body = {
-            "agent": self._config.agent,
-            "namespace": self._config.namespace,
-        }
-        sid = session_id or self._session_id
-        if sid:
-            body["session_id"] = sid
-        return body
+            self._initialized = False
+            self._writes_enabled = False
+            self._client = None
+            self._session_generation += 1
+            self._cache.clear()
 
-    def _safe_store(self, body: Dict[str, Any]) -> None:
+    def probe_readiness(self, timeout_seconds: float = READINESS_MAX_TIMEOUT_SECONDS) -> Dict[str, Any]:
+        """Perform one explicit bounded health read and return allowlisted metadata."""
+        cfg = self._active_or_fresh_config()
+        if not (cfg.base_url and cfg.api_key):
+            return {
+                "ready": False,
+                "status": "unconfigured",
+                "storage_ok": None,
+                "embedding_ok": None,
+                "uptime_seconds": None,
+                "error_type": "",
+            }
+
+        timeout = _as_float(
+            timeout_seconds,
+            READINESS_MAX_TIMEOUT_SECONDS,
+            minimum=0.1,
+            maximum=READINESS_MAX_TIMEOUT_SECONDS,
+        )
         try:
-            if self._client:
-                self._client.store(body)
+            previous_signal_handler = self._install_readiness_deadline(timeout)
+        except _ReadinessDeadlineUnavailable as exc:
+            return self._readiness_failure(exc)
+
+        try:
+            with self._tracked_operation(require_client=False) as (admitted, _, _):
+                if not admitted:
+                    return self._readiness_failure(_ProviderClosed())
+                request = urllib.request.Request(cfg.base_url.rstrip("/") + "/v1/health", method="GET")
+                response = urllib.request.urlopen(request, timeout=timeout)
+                try:
+                    raw = response.read(READINESS_MAX_BYTES + 1)
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
+            if len(raw) > READINESS_MAX_BYTES:
+                raise _ReadinessPayloadTooLarge()
+            payload = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError()
+            status = payload.get("status")
+            if status not in {"ok", "degraded", "down"}:
+                raise ValueError()
+            checks = payload.get("checks")
+            if not isinstance(checks, dict):
+                checks = {}
+            storage_ok = checks.get("storage")
+            embedding_ok = checks.get("embedding")
+            uptime_seconds = payload.get("uptime_seconds")
+            if not isinstance(storage_ok, bool):
+                storage_ok = None
+            if not isinstance(embedding_ok, bool):
+                embedding_ok = None
+            if (
+                isinstance(uptime_seconds, bool)
+                or not isinstance(uptime_seconds, (int, float))
+                or not math.isfinite(uptime_seconds)
+            ):
+                uptime_seconds = None
+            return {
+                "ready": status == "ok",
+                "status": status,
+                "storage_ok": storage_ok,
+                "embedding_ok": embedding_ok,
+                "uptime_seconds": uptime_seconds,
+                "error_type": "",
+            }
+        except Exception as exc:
+            return self._readiness_failure(exc)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, previous_signal_handler)
+
+    def _active_or_fresh_config(self) -> NoldoMemConfig:
+        with self._lock:
+            if self._initialized and not self._closing:
+                return self._config
+        return self.load_config()
+
+    def _base_body_snapshot(
+        self,
+        *,
+        session_id: str = "",
+        require_writes: bool = False,
+        expected_generation: Optional[int] = None,
+    ) -> Optional[tuple[Dict[str, Any], int]]:
+        with self._lock:
+            if (
+                self._closing
+                or (
+                    expected_generation is not None
+                    and expected_generation != self._session_generation
+                )
+                or not self._initialized
+                or self._client is None
+                or (require_writes and not self._writes_enabled)
+            ):
+                return None
+            body = {
+                "agent": self._config.agent,
+                "namespace": self._config.namespace,
+            }
+            sid = session_id or self._session_id
+            if sid:
+                body["session_id"] = sid
+            return body, self._session_generation
+
+    def _safe_store(self, body: Dict[str, Any], *, expected_generation: int) -> None:
+        try:
+            with self._network_operation(expected_generation=expected_generation) as client:
+                if client is not None:
+                    client.store(body)
         except Exception:
             return
 
-    def _recall_context(self, query: str, *, session_id: str = "") -> str:
-        if not self._client:
+    def _recall_context(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        expected_generation: Optional[int] = None,
+    ) -> str:
+        snapshot = self._recall_snapshot(
+            query,
+            session_id=session_id,
+            expected_generation=expected_generation,
+        )
+        if snapshot is None:
             return ""
+        return self._recall_context_from_snapshot(snapshot)
+
+    def _recall_context_from_snapshot(self, snapshot: _RecallSnapshot) -> str:
         try:
-            body = self._base_body(session_id=session_id)
-            body.update({"query": _truncate(query, RECALL_QUERY_MAX_CHARS), "limit": self._config.recall_limit})
-            data = self._client.recall(body)
-            context = self._format_recall(data)
-            key = self._cache_key(query, session_id)
-            with self._lock:
-                self._cache[key] = (time.time(), context)
-            return context
+            with self._network_operation(expected_generation=snapshot.session_generation) as client:
+                if client is None:
+                    return ""
+                data = client.recall(snapshot.request_body())
+            context = self._format_recall(data, max_chars=snapshot.max_chars)
+            accepted = self._cache_put(snapshot, context)
+            return context if accepted else ""
         except Exception:
             return ""
 
-    def _format_recall(self, data: Dict[str, Any]) -> str:
+    def _cache_get(self, key: tuple[str, str, int, int, str, str]) -> Optional[str]:
+        now = time.monotonic()
+        with self._lock:
+            self._prune_cache_locked(now)
+            cached = self._cache.get(key)
+            if cached is None:
+                return None
+            self._cache.move_to_end(key)
+            return cached[1]
+
+    def _cache_put(
+        self,
+        snapshot: _RecallSnapshot,
+        context: str,
+    ) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if not self._recall_snapshot_is_current_locked(snapshot):
+                return False
+            self._prune_cache_locked(now)
+            self._cache[snapshot.cache_key] = (now, context)
+            self._cache.move_to_end(snapshot.cache_key)
+            while len(self._cache) > self._config.recall_cache_max_entries:
+                self._cache.popitem(last=False)
+            return True
+
+    def _prune_cache_locked(self, now: float) -> None:
+        ttl = self._config.recall_cache_ttl_seconds
+        expired = [key for key, (created_at, _) in self._cache.items() if now - created_at >= ttl]
+        for key in expired:
+            self._cache.pop(key, None)
+
+    def _format_recall(self, data: Dict[str, Any], *, max_chars: Optional[int] = None) -> str:
         results = data.get("results") or data.get("memories") or []
         if not results:
             return ""
+        output_limit = max_chars if max_chars is not None else self._config.recall_max_chars
         lines = ["NoldoMem recall:"]
         used = len(lines[0])
         for item in results:
@@ -462,7 +805,7 @@ class NoldoMemProvider(MemoryProvider):
             score = item.get("rerank_score") or item.get("semantic_score") or item.get("score")
             score_text = f" score={score:.3f}" if isinstance(score, (float, int)) else ""
             line = f"- [{memory_type}{score_text}] {text}"
-            remaining = self._config.recall_max_chars - used - 1
+            remaining = output_limit - used - 1
             if remaining <= 0:
                 break
             line = _truncate(line, remaining)
@@ -470,8 +813,176 @@ class NoldoMemProvider(MemoryProvider):
             used += len(line) + 1
         return "\n".join(lines) if len(lines) > 1 else ""
 
-    def _cache_key(self, query: str, session_id: str) -> str:
-        return f"{session_id or self._session_id}:{query.strip().lower()[:500]}"
+    @staticmethod
+    def _request_query(query: str) -> str:
+        return _truncate(query.strip(), RECALL_QUERY_MAX_CHARS)
+
+    @contextmanager
+    def _network_operation(
+        self,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> Iterator[Optional[NoldoMemHTTPClient]]:
+        with self._tracked_operation(
+            require_client=True,
+            expected_generation=expected_generation,
+        ) as (admitted, client, _):
+            yield client if admitted else None
+
+    @contextmanager
+    def _tracked_operation(
+        self,
+        *,
+        require_client: bool,
+        expected_generation: Optional[int] = None,
+    ) -> Iterator[tuple[bool, Optional[NoldoMemHTTPClient], Optional[int]]]:
+        operation_id: Optional[int] = None
+        client: Optional[NoldoMemHTTPClient] = None
+        admission_generation: Optional[int] = None
+        with self._operations_drained:
+            generation_matches = (
+                expected_generation is None or expected_generation == self._session_generation
+            )
+            admitted = not self._closing and generation_matches and (
+                not require_client or (self._initialized and self._client is not None)
+            )
+            if admitted:
+                operation_id = self._next_operation_id
+                self._next_operation_id += 1
+                self._active_operations[operation_id] = time.monotonic()
+                client = self._client
+                admission_generation = self._session_generation
+        try:
+            yield admitted, client, admission_generation
+        finally:
+            if operation_id is not None:
+                with self._operations_drained:
+                    self._active_operations.pop(operation_id, None)
+                    self._operations_drained.notify_all()
+
+    def _network_unavailable_error(self, expected_generation: Optional[int] = None) -> str:
+        with self._lock:
+            if self._closing:
+                return self._json_error("NoldoMem is shutting down")
+            if (
+                expected_generation is not None
+                and expected_generation != self._session_generation
+            ):
+                return self._json_error("NoldoMem request lifecycle expired")
+        return self._json_error("NoldoMem is not configured")
+
+    def _network_result_allowed(
+        self,
+        client: NoldoMemHTTPClient,
+        expected_generation: int,
+    ) -> bool:
+        with self._lock:
+            # Results completed during the bounded drain are still valid. Once
+            # shutdown finishes (or times out), it clears the client and bumps
+            # the generation; session switches and reinitialization do likewise.
+            return (
+                self._initialized
+                and self._client is client
+                and expected_generation == self._session_generation
+            )
+
+    def _recall_snapshot(
+        self,
+        query: str,
+        *,
+        session_id: str,
+        expected_generation: Optional[int] = None,
+    ) -> Optional[_RecallSnapshot]:
+        with self._lock:
+            if self._closing or (
+                expected_generation is not None
+                and expected_generation != self._session_generation
+            ):
+                return None
+            cfg = self._config
+            return _RecallSnapshot(
+                agent=cfg.agent,
+                namespace=cfg.namespace,
+                limit=cfg.recall_limit,
+                max_chars=cfg.recall_max_chars,
+                session_id=session_id or self._session_id,
+                query=self._request_query(query),
+                session_generation=self._session_generation,
+            )
+
+    def _recall_snapshot_is_current(self, snapshot: _RecallSnapshot) -> bool:
+        with self._lock:
+            return self._recall_snapshot_is_current_locked(snapshot)
+
+    def _recall_snapshot_is_current_locked(self, snapshot: _RecallSnapshot) -> bool:
+        cfg = self._config
+        return (
+            not self._closing
+            and snapshot.session_generation == self._session_generation
+            and snapshot.agent == cfg.agent
+            and snapshot.namespace == cfg.namespace
+            and snapshot.limit == cfg.recall_limit
+            and snapshot.max_chars == cfg.recall_max_chars
+        )
+
+    @staticmethod
+    def _readiness_failure(exc: Exception) -> Dict[str, Any]:
+        if isinstance(exc, _ProviderClosed):
+            error_type = "ProviderClosed"
+        elif isinstance(exc, _ReadinessDeadlineExceeded):
+            error_type = "DeadlineExceeded"
+        elif isinstance(exc, _ReadinessDeadlineUnavailable):
+            error_type = "DeadlineUnavailable"
+        elif isinstance(exc, _ReadinessPayloadTooLarge):
+            error_type = "ResponseTooLarge"
+        elif isinstance(exc, urllib.error.HTTPError):
+            error_type = "HTTPError"
+        elif isinstance(exc, urllib.error.URLError):
+            error_type = "URLError"
+        elif isinstance(exc, TimeoutError):
+            error_type = "TimeoutError"
+        elif isinstance(exc, OSError):
+            error_type = "OSError"
+        elif isinstance(exc, (UnicodeDecodeError, ValueError)):
+            error_type = "InvalidResponse"
+        else:
+            error_type = "ReadinessError"
+        return {
+            "ready": False,
+            "status": "unavailable",
+            "storage_ok": None,
+            "embedding_ok": None,
+            "uptime_seconds": None,
+            "error_type": error_type,
+        }
+
+    @staticmethod
+    def _install_readiness_deadline(timeout_seconds: float) -> Any:
+        if (
+            threading.current_thread() is not threading.main_thread()
+            or not hasattr(signal, "SIGALRM")
+            or not hasattr(signal, "ITIMER_REAL")
+            or not hasattr(signal, "setitimer")
+            or not hasattr(signal, "getitimer")
+        ):
+            raise _ReadinessDeadlineUnavailable()
+
+        current_timer = signal.getitimer(signal.ITIMER_REAL)
+        if current_timer[0] > 0.0:
+            raise _ReadinessDeadlineUnavailable()
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+
+        def deadline_exceeded(signum: int, frame: Any) -> None:
+            raise _ReadinessDeadlineExceeded()
+
+        try:
+            signal.signal(signal.SIGALRM, deadline_exceeded)
+            signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        except Exception as exc:
+            signal.signal(signal.SIGALRM, previous_handler)
+            raise _ReadinessDeadlineUnavailable() from exc
+        return previous_handler
 
     def _memory_type(self, raw: Any) -> str:
         value = str(raw or "other").strip().lower()
