@@ -41,7 +41,7 @@ Create `$HERMES_HOME/noldomem.json`:
 {
   "base_url": "http://127.0.0.1:8787",
   "api_key_file": "/path/to/noldomem-api-key",
-  "agent": "hermes-dorry",
+  "agent": "hermes-primary",
   "namespace": "default",
   "recall_limit": 5,
   "recall_max_chars": 3500,
@@ -57,6 +57,8 @@ Create `$HERMES_HOME/noldomem.json`:
 
 Secrets can also be supplied through `NOLDOMEM_API_KEY` or
 `NOLDOMEM_API_KEY_FILE`. Do not put secrets in committed config files.
+Configuration is published to the provider during initialization; later
+availability checks do not hot-reconfigure an active recall scope.
 
 ## Tools
 
@@ -83,17 +85,41 @@ the backend result.
 
 Hermes invokes `on_memory_write` inline for successful built-in memory writes,
 so that compatibility hook is synchronous too. The adapter owns no worker
-threads, queues, or pending-operation registry: a hook returns only after its
-single bounded HTTP operation finishes. Shutdown marks the provider as closing
-before waiting, rejects queued or late hooks, and applies one five-second
-monotonic deadline to an already-running inline hook. Because Python cannot
-force-stop an external caller thread, that caller may finish after the shutdown
-deadline, but its HTTP operation remains bounded by `timeout_seconds`.
+threads or queues. It keeps only a bounded-lifetime registry of currently
+executing backend calls so shutdown can fence recall, store, pin, turn sync,
+queued prefetch, and built-in-memory hooks consistently.
+
+Shutdown marks the provider as closing before it waits, rejects every late
+backend call, and clears the client and cache when its bounded wait ends. Its
+provider-local five-second deadline is anchored to the oldest operation already
+admitted by the adapter. Hermes v0.19 does not pass its earlier host-executor
+drain deadline into provider shutdown, so the adapter does not claim one shared
+deadline across both lifecycle stages. Because Python cannot force-stop an
+external caller thread, a call may finish after the provider-local deadline,
+but the adapter discards any tool response that arrives after close and cannot
+return or cache recalled context. A remote store or pin may therefore have an
+indeterminate backend outcome if shutdown wins that race. The real HTTP request
+remains bounded by `timeout_seconds`.
+
+Hermes v0.19 owns the executor submission queue used before the provider's
+`queue_prefetch` method is invoked. The provider does not add another queue or
+thread, but the provider contract cannot coalesce calls that are still waiting
+inside that host-owned queue. Bounding that host backlog requires a Hermes-side
+executor policy rather than an adapter change.
 
 Recall results use a thread-safe LRU cache. `recall_cache_ttl_seconds` controls
 expiry and `recall_cache_max_entries` controls the maximum entry count. The
 cache is cleared on session changes, reset, Hermes `rewound=True` notifications,
-legacy rewind reasons, and compaction boundaries.
+legacy rewind reasons, compaction boundaries, and shutdown. Cache identity uses
+the effective agent, namespace, recall limit, output limit, session ID, and
+outbound query as structured fields. Query case and internal whitespace are
+preserved exactly as sent while only leading/trailing whitespace is normalized.
+This prevents cross-session, cross-namespace, delimiter, and case-only request
+aliasing.
+
+Recall payloads are sanitized with Hermes v0.19 fence semantics. A complete
+`<memory-context>...</memory-context>` block is discarded rather than unwrapped,
+so provider data cannot smuggle a nested trusted-memory fence into the prompt.
 
 Both cache settings are validated. Supported ranges are:
 

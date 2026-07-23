@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import signal
 import threading
 import time
@@ -12,9 +13,10 @@ import urllib.error
 import urllib.request
 
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -25,8 +27,21 @@ except Exception:  # pragma: no cover - used only outside Hermes tests
 try:
     from agent.memory_manager import sanitize_context
 except Exception:  # pragma: no cover - Hermes supplies this at runtime
+    _FENCE_TAG_RE = re.compile(r"</?\s*memory-context\s*>", re.IGNORECASE)
+    _INTERNAL_CONTEXT_RE = re.compile(
+        r"<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>",
+        re.IGNORECASE,
+    )
+    _INTERNAL_NOTE_RE = re.compile(
+        r"\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*"
+        r"Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*",
+        re.IGNORECASE,
+    )
+
     def sanitize_context(text: str) -> str:
-        return text.replace("<memory-context>", "").replace("</memory-context>", "")
+        text = _INTERNAL_CONTEXT_RE.sub("", text)
+        text = _INTERNAL_NOTE_RE.sub("", text)
+        return _FENCE_TAG_RE.sub("", text)
 
 
 VALID_MEMORY_TYPES = {"fact", "preference", "rule", "conversation", "lesson", "other"}
@@ -58,6 +73,39 @@ class NoldoMemConfig:
     non_primary_writes_enabled: bool = False
     recall_cache_ttl_seconds: float = DEFAULT_RECALL_CACHE_TTL_SECONDS
     recall_cache_max_entries: int = DEFAULT_RECALL_CACHE_MAX_ENTRIES
+
+
+@dataclass(frozen=True)
+class _RecallSnapshot:
+    agent: str
+    namespace: str
+    limit: int
+    max_chars: int
+    session_id: str
+    query: str
+    session_generation: int
+
+    @property
+    def cache_key(self) -> tuple[str, str, int, int, str, str]:
+        return (
+            self.agent,
+            self.namespace,
+            self.limit,
+            self.max_chars,
+            self.session_id,
+            self.query,
+        )
+
+    def request_body(self) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "agent": self.agent,
+            "namespace": self.namespace,
+            "query": self.query,
+            "limit": self.limit,
+        }
+        if self.session_id:
+            body["session_id"] = self.session_id
+        return body
 
 
 class NoldoMemHTTPClient:
@@ -168,6 +216,10 @@ class _ReadinessDeadlineUnavailable(RuntimeError):
     pass
 
 
+class _ProviderClosed(RuntimeError):
+    pass
+
+
 class NoldoMemProvider(MemoryProvider):
     @property
     def name(self) -> str:
@@ -179,12 +231,17 @@ class NoldoMemProvider(MemoryProvider):
         self._session_id = ""
         self._initialized = False
         self._writes_enabled = False
-        self._cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
+        self._cache: OrderedDict[
+            tuple[str, str, int, int, str, str],
+            tuple[float, str],
+        ] = OrderedDict()
         self._session_generation = 0
         self._closing = False
         self._shutdown_deadline: Optional[float] = None
         self._lock = threading.Lock()
-        self._operation_lock = threading.Lock()
+        self._operations_drained = threading.Condition(self._lock)
+        self._active_operations: Dict[int, float] = {}
+        self._next_operation_id = 0
 
     def load_config(self, hermes_home: Optional[str] = None, **overrides: Any) -> NoldoMemConfig:
         home = Path(hermes_home).expanduser() if hermes_home else _default_hermes_home()
@@ -263,26 +320,33 @@ class NoldoMemProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         cfg = self.load_config()
-        self._config = cfg
-        return bool(cfg.base_url and cfg.api_key)
+        configured = bool(cfg.base_url and cfg.api_key)
+        with self._lock:
+            # Discovery publishes configuration only before initialization.
+            # Re-checking availability on a live provider must not hot-swap
+            # recall scope underneath in-flight/cache validation.
+            if not self._initialized and not self._closing:
+                self._config = cfg
+        return configured
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         agent_override = kwargs.get("agent_identity")
         cfg = self.load_config(kwargs.get("hermes_home"))
         if cfg.agent in {"", "auto"} and agent_override:
             cfg.agent = str(agent_override)
-        self._config = cfg
-        self._client = NoldoMemHTTPClient(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
+        client = NoldoMemHTTPClient(cfg.base_url, cfg.api_key, cfg.timeout_seconds)
+        agent_context = str(kwargs.get("agent_context") or "primary")
+        writes_enabled = cfg.sync_turns_enabled and (
+            agent_context == "primary" or cfg.non_primary_writes_enabled
+        )
         with self._lock:
+            self._config = cfg
+            self._client = client
             self._session_id = session_id
             self._session_generation += 1
             self._cache.clear()
-        self._initialized = bool(cfg.api_key)
-
-        agent_context = str(kwargs.get("agent_context") or "primary")
-        self._writes_enabled = cfg.sync_turns_enabled and (
-            agent_context == "primary" or cfg.non_primary_writes_enabled
-        )
+            self._initialized = bool(cfg.api_key)
+            self._writes_enabled = writes_enabled
 
     def system_prompt_block(self) -> str:
         if not self._initialized:
@@ -298,14 +362,18 @@ class NoldoMemProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not (self._initialized and self._config.prefetch_enabled and query.strip()):
             return ""
-        effective_session_id, _ = self._session_snapshot(session_id)
-        key = self._cache_key(query, effective_session_id)
-        cached = self._cache_get(key)
-        if cached is not None:
-            return cached
-        if not self._config.sync_prefetch_on_miss:
-            return ""
-        return self._recall_context(query, session_id=session_id)
+        with self._tracked_operation(require_client=False) as (admitted, _):
+            if not admitted:
+                return ""
+            snapshot = self._recall_snapshot(query, session_id=session_id)
+            if snapshot is None:
+                return ""
+            cached = self._cache_get(snapshot.cache_key)
+            if cached is not None:
+                return cached if self._recall_snapshot_is_current(snapshot) else ""
+            if not self._config.sync_prefetch_on_miss:
+                return ""
+            return self._recall_context_from_snapshot(snapshot)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if not (self._initialized and self._config.prefetch_enabled and query.strip()):
@@ -394,18 +462,22 @@ class NoldoMemProvider(MemoryProvider):
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
-        if not self._client:
-            return self._json_error("NoldoMem is not configured")
         try:
             if tool_name == "noldomem_recall":
                 body = self._base_body(session_id=kwargs.get("session_id", ""))
-                body["query"] = _truncate(str(args.get("query") or "").strip(), RECALL_QUERY_MAX_CHARS)
+                body["query"] = self._request_query(str(args.get("query") or ""))
                 body["limit"] = _as_int(args.get("limit"), self._config.recall_limit, minimum=1, maximum=20)
                 if args.get("namespace"):
                     body["namespace"] = str(args["namespace"])
                 if args.get("memory_type"):
                     body["memory_type"] = self._memory_type(args["memory_type"])
-                return json.dumps({"success": True, "data": self._client.recall(body)}, ensure_ascii=False)
+                with self._network_operation() as client:
+                    if client is None:
+                        return self._network_unavailable_error()
+                    data = client.recall(body)
+                    if not self._network_result_allowed():
+                        return self._network_unavailable_error()
+                    return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_store":
                 body = self._base_body(session_id=kwargs.get("session_id", ""))
@@ -414,14 +486,26 @@ class NoldoMemProvider(MemoryProvider):
                 body["source"] = str(args.get("source") or "hermes-tool")
                 if args.get("namespace"):
                     body["namespace"] = str(args["namespace"])
-                return json.dumps({"success": True, "data": self._client.store(body)}, ensure_ascii=False)
+                with self._network_operation() as client:
+                    if client is None:
+                        return self._network_unavailable_error()
+                    data = client.store(body)
+                    if not self._network_result_allowed():
+                        return self._network_unavailable_error()
+                    return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_pin":
                 memory_id = str(args.get("memory_id") or "").strip()
                 if not memory_id:
                     return self._json_error("memory_id is required")
                 body = {"id": memory_id, "agent": self._config.agent}
-                return json.dumps({"success": True, "data": self._client.pin(body)}, ensure_ascii=False)
+                with self._network_operation() as client:
+                    if client is None:
+                        return self._network_unavailable_error()
+                    data = client.pin(body)
+                    if not self._network_result_allowed():
+                        return self._network_unavailable_error()
+                    return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             return self._json_error(f"unknown tool: {tool_name}")
         except Exception as exc:
@@ -436,34 +520,40 @@ class NoldoMemProvider(MemoryProvider):
     ) -> None:
         if not (self._initialized and content.strip() and self._client):
             return
-        with self._operation_lock:
-            with self._lock:
-                if self._closing:
-                    return
-            memory_type = "preference" if target == "user" else "fact"
-            body = self._base_body()
-            body.update(
-                {
-                    "text": content.strip(),
-                    "memory_type": memory_type,
-                    "category": "user" if target == "user" else "other",
-                    "source": f"hermes-built-in-memory-{action}",
-                }
-            )
-            self._safe_store(body)
+        memory_type = "preference" if target == "user" else "fact"
+        body = self._base_body()
+        body.update(
+            {
+                "text": content.strip(),
+                "memory_type": memory_type,
+                "category": "user" if target == "user" else "other",
+                "source": f"hermes-built-in-memory-{action}",
+            }
+        )
+        self._safe_store(body)
 
     def shutdown(self) -> None:
         started_at = time.monotonic()
-        with self._lock:
+        with self._operations_drained:
             if not self._closing:
                 self._closing = True
-                self._shutdown_deadline = started_at + SHUTDOWN_TIMEOUT_SECONDS
+                oldest_operation_started_at = min(self._active_operations.values(), default=started_at)
+                self._shutdown_deadline = min(
+                    started_at + SHUTDOWN_TIMEOUT_SECONDS,
+                    oldest_operation_started_at + SHUTDOWN_TIMEOUT_SECONDS,
+                )
             deadline = self._shutdown_deadline or started_at
+            while self._active_operations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._operations_drained.wait(timeout=remaining)
 
-        remaining = max(0.0, deadline - time.monotonic())
-        acquired = self._operation_lock.acquire(timeout=remaining)
-        if acquired:
-            self._operation_lock.release()
+            self._initialized = False
+            self._writes_enabled = False
+            self._client = None
+            self._session_generation += 1
+            self._cache.clear()
 
     def probe_readiness(self, timeout_seconds: float = READINESS_MAX_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """Perform one explicit bounded health read and return allowlisted metadata."""
@@ -490,14 +580,17 @@ class NoldoMemProvider(MemoryProvider):
             return self._readiness_failure(exc)
 
         try:
-            request = urllib.request.Request(cfg.base_url.rstrip("/") + "/v1/health", method="GET")
-            response = urllib.request.urlopen(request, timeout=timeout)
-            try:
-                raw = response.read(READINESS_MAX_BYTES + 1)
-            finally:
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
+            with self._tracked_operation(require_client=False) as (admitted, _):
+                if not admitted:
+                    return self._readiness_failure(_ProviderClosed())
+                request = urllib.request.Request(cfg.base_url.rstrip("/") + "/v1/health", method="GET")
+                response = urllib.request.urlopen(request, timeout=timeout)
+                try:
+                    raw = response.read(READINESS_MAX_BYTES + 1)
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
             if len(raw) > READINESS_MAX_BYTES:
                 raise _ReadinessPayloadTooLarge()
             payload = json.loads(raw.decode("utf-8") or "{}")
@@ -548,27 +641,31 @@ class NoldoMemProvider(MemoryProvider):
 
     def _safe_store(self, body: Dict[str, Any]) -> None:
         try:
-            if self._client:
-                self._client.store(body)
+            with self._network_operation() as client:
+                if client is not None:
+                    client.store(body)
         except Exception:
             return
 
     def _recall_context(self, query: str, *, session_id: str = "") -> str:
-        if not self._client:
+        snapshot = self._recall_snapshot(query, session_id=session_id)
+        if snapshot is None:
             return ""
+        return self._recall_context_from_snapshot(snapshot)
+
+    def _recall_context_from_snapshot(self, snapshot: _RecallSnapshot) -> str:
         try:
-            effective_session_id, session_generation = self._session_snapshot(session_id)
-            body = self._base_body(session_id=effective_session_id)
-            body.update({"query": _truncate(query, RECALL_QUERY_MAX_CHARS), "limit": self._config.recall_limit})
-            data = self._client.recall(body)
-            context = self._format_recall(data)
-            key = self._cache_key(query, effective_session_id)
-            self._cache_put(key, context, session_generation=session_generation)
-            return context
+            with self._network_operation() as client:
+                if client is None:
+                    return ""
+                data = client.recall(snapshot.request_body())
+            context = self._format_recall(data, max_chars=snapshot.max_chars)
+            accepted = self._cache_put(snapshot, context)
+            return context if accepted else ""
         except Exception:
             return ""
 
-    def _cache_get(self, key: str) -> Optional[str]:
+    def _cache_get(self, key: tuple[str, str, int, int, str, str]) -> Optional[str]:
         now = time.monotonic()
         with self._lock:
             self._prune_cache_locked(now)
@@ -578,16 +675,21 @@ class NoldoMemProvider(MemoryProvider):
             self._cache.move_to_end(key)
             return cached[1]
 
-    def _cache_put(self, key: str, context: str, *, session_generation: int) -> None:
+    def _cache_put(
+        self,
+        snapshot: _RecallSnapshot,
+        context: str,
+    ) -> bool:
         now = time.monotonic()
         with self._lock:
-            if session_generation != self._session_generation:
-                return
+            if not self._recall_snapshot_is_current_locked(snapshot):
+                return False
             self._prune_cache_locked(now)
-            self._cache[key] = (now, context)
-            self._cache.move_to_end(key)
+            self._cache[snapshot.cache_key] = (now, context)
+            self._cache.move_to_end(snapshot.cache_key)
             while len(self._cache) > self._config.recall_cache_max_entries:
                 self._cache.popitem(last=False)
+            return True
 
     def _prune_cache_locked(self, now: float) -> None:
         ttl = self._config.recall_cache_ttl_seconds
@@ -595,10 +697,11 @@ class NoldoMemProvider(MemoryProvider):
         for key in expired:
             self._cache.pop(key, None)
 
-    def _format_recall(self, data: Dict[str, Any]) -> str:
+    def _format_recall(self, data: Dict[str, Any], *, max_chars: Optional[int] = None) -> str:
         results = data.get("results") or data.get("memories") or []
         if not results:
             return ""
+        output_limit = max_chars if max_chars is not None else self._config.recall_max_chars
         lines = ["NoldoMem recall:"]
         used = len(lines[0])
         for item in results:
@@ -609,7 +712,7 @@ class NoldoMemProvider(MemoryProvider):
             score = item.get("rerank_score") or item.get("semantic_score") or item.get("score")
             score_text = f" score={score:.3f}" if isinstance(score, (float, int)) else ""
             line = f"- [{memory_type}{score_text}] {text}"
-            remaining = self._config.recall_max_chars - used - 1
+            remaining = output_limit - used - 1
             if remaining <= 0:
                 break
             line = _truncate(line, remaining)
@@ -617,17 +720,88 @@ class NoldoMemProvider(MemoryProvider):
             used += len(line) + 1
         return "\n".join(lines) if len(lines) > 1 else ""
 
-    def _cache_key(self, query: str, session_id: str) -> str:
-        normalized_query = _truncate(query.strip(), RECALL_QUERY_MAX_CHARS).lower()
-        return f"{session_id}:{normalized_query}"
+    @staticmethod
+    def _request_query(query: str) -> str:
+        return _truncate(query.strip(), RECALL_QUERY_MAX_CHARS)
 
-    def _session_snapshot(self, session_id: str) -> tuple[str, int]:
+    @contextmanager
+    def _network_operation(self) -> Iterator[Optional[NoldoMemHTTPClient]]:
+        with self._tracked_operation(require_client=True) as (admitted, client):
+            yield client if admitted else None
+
+    @contextmanager
+    def _tracked_operation(
+        self,
+        *,
+        require_client: bool,
+    ) -> Iterator[tuple[bool, Optional[NoldoMemHTTPClient]]]:
+        operation_id: Optional[int] = None
+        client: Optional[NoldoMemHTTPClient] = None
+        with self._operations_drained:
+            admitted = not self._closing and (
+                not require_client or (self._initialized and self._client is not None)
+            )
+            if admitted:
+                operation_id = self._next_operation_id
+                self._next_operation_id += 1
+                self._active_operations[operation_id] = time.monotonic()
+                client = self._client
+        try:
+            yield admitted, client
+        finally:
+            if operation_id is not None:
+                with self._operations_drained:
+                    self._active_operations.pop(operation_id, None)
+                    self._operations_drained.notify_all()
+
+    def _network_unavailable_error(self) -> str:
         with self._lock:
-            return session_id or self._session_id, self._session_generation
+            if self._closing:
+                return self._json_error("NoldoMem is shutting down")
+        return self._json_error("NoldoMem is not configured")
+
+    def _network_result_allowed(self) -> bool:
+        with self._lock:
+            # Results completed during the bounded drain are still valid. Once
+            # shutdown finishes (or times out), it clears both fields and any
+            # later response is discarded.
+            return self._initialized and self._client is not None
+
+    def _recall_snapshot(self, query: str, *, session_id: str) -> Optional[_RecallSnapshot]:
+        with self._lock:
+            if self._closing:
+                return None
+            cfg = self._config
+            return _RecallSnapshot(
+                agent=cfg.agent,
+                namespace=cfg.namespace,
+                limit=cfg.recall_limit,
+                max_chars=cfg.recall_max_chars,
+                session_id=session_id or self._session_id,
+                query=self._request_query(query),
+                session_generation=self._session_generation,
+            )
+
+    def _recall_snapshot_is_current(self, snapshot: _RecallSnapshot) -> bool:
+        with self._lock:
+            return self._recall_snapshot_is_current_locked(snapshot)
+
+    def _recall_snapshot_is_current_locked(self, snapshot: _RecallSnapshot) -> bool:
+        cfg = self._config
+        return (
+            not self._closing
+            and snapshot.session_generation == self._session_generation
+            and snapshot.agent == cfg.agent
+            and snapshot.namespace == cfg.namespace
+            and snapshot.limit == cfg.recall_limit
+            and snapshot.max_chars == cfg.recall_max_chars
+        )
 
     @staticmethod
     def _readiness_failure(exc: Exception) -> Dict[str, Any]:
-        if isinstance(exc, _ReadinessDeadlineExceeded):
+        if isinstance(exc, _ProviderClosed):
+            error_type = "ProviderClosed"
+        elif isinstance(exc, _ReadinessDeadlineExceeded):
             error_type = "DeadlineExceeded"
         elif isinstance(exc, _ReadinessDeadlineUnavailable):
             error_type = "DeadlineUnavailable"

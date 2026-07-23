@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Remove provider-owned background workers from the Hermes adapter, relying on the Hermes v0.19 host executor for turn sync and queued prefetch work while keeping inline memory-write hooks synchronous.
 - Bound the Hermes recall cache with configurable TTL/LRU limits and invalidate it across session and compaction boundaries.
 - Keep Hermes adapter discovery network-free and make live readiness an explicit, bounded, privacy-safe doctor option.
+- Isolate Hermes recall cache entries by the full effective request scope, discard recall/tool results that finish after close, reject late backend work with a bounded provider-local shutdown wait, and match Hermes v0.19 context sanitization semantics.
 
 ## [1.27.15] - 2026-07-20
 

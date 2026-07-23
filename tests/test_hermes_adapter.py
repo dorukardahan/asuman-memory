@@ -1,10 +1,25 @@
 import json
+import os
+import re
 import signal
+import subprocess
 import sys
 import threading
 import time
 import types
 from pathlib import Path
+
+import pytest
+
+
+_POSIX_DEADLINE_AVAILABLE = all(
+    hasattr(signal, name)
+    for name in ("SIGALRM", "ITIMER_REAL", "setitimer", "getitimer")
+)
+requires_posix_deadline = pytest.mark.skipif(
+    not _POSIX_DEADLINE_AVAILABLE,
+    reason="POSIX interval timers are unavailable",
+)
 
 
 class _MemoryProvider:
@@ -12,7 +27,20 @@ class _MemoryProvider:
 
 
 def _sanitize_context(text):
-    return text.replace("<memory-context>", "").replace("</memory-context>", "")
+    text = re.sub(
+        r"<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*"
+        r"Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"</?\s*memory-context\s*>", "", text, flags=re.IGNORECASE)
 
 
 agent_module = types.ModuleType("agent")
@@ -134,7 +162,7 @@ def test_provider_pin_tool_uses_id_payload(monkeypatch, tmp_path):
     assert captured == {"id": "mem_1", "agent": "hermes"}
 
 
-def test_prefetch_formats_recall_without_memory_context_tags(monkeypatch, tmp_path):
+def test_prefetch_drops_fenced_payload_but_keeps_safe_recall(monkeypatch, tmp_path):
     key_file = tmp_path / "key"
     key_file.write_text("test-key", encoding="utf-8")
     monkeypatch.setenv("NOLDOMEM_API_KEY_FILE", str(key_file))
@@ -147,7 +175,12 @@ def test_prefetch_formats_recall_without_memory_context_tags(monkeypatch, tmp_pa
                         "text": "<memory-context>Use BGE-M3 for embeddings.</memory-context>",
                         "memory_type": "rule",
                         "semantic_score": 0.91,
-                    }
+                    },
+                    {
+                        "text": "Keep retrieval deterministic.",
+                        "memory_type": "rule",
+                        "semantic_score": 0.89,
+                    },
                 ]
             }
 
@@ -158,7 +191,8 @@ def test_prefetch_formats_recall_without_memory_context_tags(monkeypatch, tmp_pa
     context = provider.prefetch("embedding model?", session_id="session-1")
 
     assert "NoldoMem recall:" in context
-    assert "Use BGE-M3 for embeddings." in context
+    assert "Use BGE-M3 for embeddings." not in context
+    assert "Keep retrieval deterministic." in context
     assert "<memory-context>" not in context
 
 
@@ -388,7 +422,7 @@ def test_shutdown_rejects_late_memory_writes(monkeypatch, tmp_path):
     assert not hasattr(provider, "_fallback")
 
 
-def test_shutdown_marks_closing_before_waiting_and_rejects_queued_memory_writes(monkeypatch, tmp_path):
+def test_shutdown_marks_closing_before_rejecting_late_memory_writes(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
     active_started = threading.Event()
     release_active = threading.Event()
@@ -424,12 +458,13 @@ def test_shutdown_marks_closing_before_waiting_and_rejects_queued_memory_writes(
     try:
         active_thread.start()
         assert active_started.wait(1.0)
-        queued_thread.start()
-        assert queued_attempted.wait(1.0)
         shutdown_thread.start()
         assert shutdown_started.wait(1.0)
-
         assert _wait_until(lambda: provider._closing, timeout=0.1)
+
+        queued_thread.start()
+        assert queued_attempted.wait(1.0)
+        queued_thread.join(timeout=1.0)
         assert calls == ["active"]
     finally:
         release_active.set()
@@ -445,29 +480,27 @@ def test_shutdown_uses_one_monotonic_total_deadline(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
     timeouts = []
 
-    class RecordingLock:
-        def acquire(self, *, timeout):
-            timeouts.append(timeout)
-            return False
-
-        def release(self):
-            raise AssertionError("an unacquired lock must not be released")
-
+    class RecordingCondition:
         def __enter__(self):
-            raise AssertionError("shutdown attempted an unbounded lock wait")
+            return self
 
         def __exit__(self, exc_type, exc, traceback):
             return False
 
-    provider._operation_lock = RecordingLock()
-    clock = iter([100.0, 100.25])
+        def wait(self, *, timeout):
+            timeouts.append(timeout)
+            provider._active_operations.clear()
+
+    provider._active_operations[0] = 100.0
+    provider._operations_drained = RecordingCondition()
+    clock = iter([100.25, 100.5])
     monkeypatch.setattr("noldomem.SHUTDOWN_TIMEOUT_SECONDS", 1.0, raising=False)
     monkeypatch.setattr("noldomem.time.monotonic", lambda: next(clock))
 
     provider.shutdown()
 
     assert provider._closing is True
-    assert timeouts == [0.75]
+    assert timeouts == [0.5]
 
 
 def test_concurrent_shutdown_callers_share_the_same_wait(monkeypatch, tmp_path):
@@ -508,6 +541,276 @@ def test_concurrent_shutdown_callers_share_the_same_wait(monkeypatch, tmp_path):
     assert not operation_thread.is_alive()
     assert all(not thread.is_alive() for thread in shutdown_threads)
     assert all(event.is_set() for event in shutdown_returned)
+
+
+def test_shutdown_drains_all_admitted_network_operations_and_rejects_late_calls(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path, sync_turns_enabled=True)
+    release = threading.Event()
+    calls = []
+    calls_lock = threading.Lock()
+
+    class FakeClient:
+        def _block(self, kind):
+            with calls_lock:
+                calls.append(kind)
+            release.wait(1.0)
+
+        def recall(self, body):
+            self._block("recall")
+            return {"results": [{"text": "safe context"}]}
+
+        def store(self, body):
+            self._block(f"store:{body['source']}")
+            return {"stored": True}
+
+        def pin(self, body):
+            self._block("pin")
+            return {"pinned": True}
+
+    provider._client = FakeClient()
+    tool_results = []
+    workers = [
+        threading.Thread(target=provider.prefetch, args=("active recall",)),
+        threading.Thread(target=provider.sync_turn, args=("active user", "active assistant")),
+        threading.Thread(
+            target=lambda: tool_results.append(
+                json.loads(provider.handle_tool_call("noldomem_store", {"text": "active store"}))
+            )
+        ),
+        threading.Thread(
+            target=lambda: tool_results.append(
+                json.loads(provider.handle_tool_call("noldomem_pin", {"memory_id": "active-pin"}))
+            )
+        ),
+    ]
+    shutdown_returned = threading.Event()
+    shutdown_thread = threading.Thread(target=lambda: (provider.shutdown(), shutdown_returned.set()))
+
+    try:
+        for worker in workers:
+            worker.start()
+        assert _wait_until(lambda: len(calls) == 4)
+
+        shutdown_thread.start()
+        assert _wait_until(lambda: provider._closing)
+        assert shutdown_returned.wait(0.05) is False
+
+        admitted_call_count = len(calls)
+        assert provider.prefetch("late recall") == ""
+        provider.queue_prefetch("late queue")
+        provider.sync_turn("late user", "late assistant")
+        provider.on_memory_write("create", "project", "late hook")
+        late_tool_results = [
+            json.loads(provider.handle_tool_call("noldomem_recall", {"query": "late tool recall"})),
+            json.loads(provider.handle_tool_call("noldomem_store", {"text": "late tool store"})),
+            json.loads(provider.handle_tool_call("noldomem_pin", {"memory_id": "late-tool-pin"})),
+        ]
+
+        assert len(calls) == admitted_call_count
+        assert all(result["success"] is False for result in late_tool_results)
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=1.0)
+        shutdown_thread.join(timeout=1.0)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert not shutdown_thread.is_alive()
+    assert shutdown_returned.is_set()
+    assert all(result["success"] is True for result in tool_results)
+    assert provider._client is None
+    assert provider._initialized is False
+    assert provider._cache == {}
+
+    readiness_network_called = threading.Event()
+
+    def forbidden_readiness_network(*args, **kwargs):
+        readiness_network_called.set()
+        raise AssertionError("closed provider attempted a readiness call")
+
+    monkeypatch.setattr("noldomem.urllib.request.urlopen", forbidden_readiness_network)
+    readiness = provider.probe_readiness(timeout_seconds=0.1)
+    assert readiness_network_called.is_set() is False
+    assert readiness["ready"] is False
+    assert readiness["error_type"] == "ProviderClosed"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("noldomem_recall", {"query": "active recall"}),
+        ("noldomem_store", {"text": "active store"}),
+        ("noldomem_pin", {"memory_id": "active-pin"}),
+    ],
+)
+def test_tool_result_is_discarded_if_shutdown_deadline_expires_first(
+    monkeypatch,
+    tmp_path,
+    tool_name,
+    args,
+):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    result = []
+
+    class FakeClient:
+        def _complete_late(self):
+            operation_started.set()
+            release_operation.wait(1.0)
+            return {"private_marker": "must-not-return-after-close"}
+
+        def recall(self, body):
+            return self._complete_late()
+
+        def store(self, body):
+            return self._complete_late()
+
+        def pin(self, body):
+            return self._complete_late()
+
+    provider._client = FakeClient()
+    monkeypatch.setattr("noldomem.SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    worker = threading.Thread(
+        target=lambda: result.append(json.loads(provider.handle_tool_call(tool_name, args)))
+    )
+    worker.start()
+    assert operation_started.wait(1.0)
+
+    provider.shutdown()
+    assert worker.is_alive()
+
+    release_operation.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result[0]["success"] is False
+    assert "shutting down" in result[0]["error"].lower()
+    assert "private_marker" not in json.dumps(result[0])
+
+
+def test_shutdown_budget_includes_time_already_spent_in_active_operations(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    recall_started = threading.Event()
+    store_started = threading.Event()
+    release = threading.Event()
+
+    class FakeClient:
+        def recall(self, body):
+            recall_started.set()
+            release.wait(1.0)
+            return {"results": []}
+
+        def store(self, body):
+            store_started.set()
+            release.wait(1.0)
+            return {"stored": True}
+
+    provider._client = FakeClient()
+    monkeypatch.setattr("noldomem.SHUTDOWN_TIMEOUT_SECONDS", 0.1)
+    clock = [100.0]
+    monkeypatch.setattr("noldomem.time.monotonic", lambda: clock[0])
+    recall_thread = threading.Thread(target=provider.queue_prefetch, args=("active recall",))
+    store_thread = threading.Thread(
+        target=provider.on_memory_write,
+        args=("create", "project", "active store"),
+    )
+
+    try:
+        recall_thread.start()
+        store_thread.start()
+        assert recall_started.wait(1.0)
+        assert store_started.wait(1.0)
+        clock[0] += 0.12
+
+        started_at = time.perf_counter()
+        provider.shutdown()
+        elapsed = time.perf_counter() - started_at
+
+        assert elapsed < 0.05
+    finally:
+        release.set()
+        recall_thread.join(timeout=1.0)
+        store_thread.join(timeout=1.0)
+
+
+def test_real_hermes_v019_shutdown_anchors_to_oldest_provider_operation():
+    script = r'''
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+
+try:
+    import agent.memory_manager as memory_manager
+except Exception:
+    raise SystemExit(77)
+
+import noldomem
+
+with tempfile.TemporaryDirectory() as home:
+    os.environ["NOLDOMEM_API_KEY"] = "synthetic-test-key"
+    provider = noldomem.NoldoMemProvider()
+    provider.initialize("session", hermes_home=home)
+    recall_started = threading.Event()
+    store_started = threading.Event()
+    release = threading.Event()
+
+    class BlockingClient:
+        def recall(self, body):
+            recall_started.set()
+            release.wait(1.0)
+            return {"results": []}
+
+        def store(self, body):
+            store_started.set()
+            release.wait(1.0)
+            return {"stored": True}
+
+    provider._client = BlockingClient()
+    manager = memory_manager.MemoryManager()
+    manager.add_provider(provider)
+    memory_manager._SYNC_DRAIN_TIMEOUT_S = 0.1
+    noldomem.SHUTDOWN_TIMEOUT_SECONDS = 0.1
+    manager.queue_prefetch_all("active recall")
+    if not recall_started.wait(1.0):
+        raise SystemExit(2)
+    writer = threading.Thread(
+        target=provider.on_memory_write,
+        args=("create", "project", "active store"),
+    )
+    writer.start()
+    if not store_started.wait(1.0):
+        raise SystemExit(3)
+
+    started_at = time.monotonic()
+    manager.shutdown_all()
+    elapsed = time.monotonic() - started_at
+    release.set()
+    writer.join(1.0)
+    print(json.dumps({"elapsed": elapsed, "writer_alive": writer.is_alive()}))
+'''
+    env = dict(os.environ)
+    adapter_path = str(REPO_ROOT / "adapters" / "hermes")
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [adapter_path, env.get("PYTHONPATH", "")]))
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("Hermes v0.19 modules are not installed")
+
+    assert result.returncode == 0, result.stderr
+    metrics = json.loads(result.stdout.strip().splitlines()[-1])
+    assert 0.08 <= metrics["elapsed"] < 0.16
+    assert metrics["writer_alive"] is False
 
 
 def test_explicit_store_is_synchronous_exactly_once_and_not_backgrounded(monkeypatch, tmp_path):
@@ -640,6 +943,168 @@ def test_recall_cache_does_not_collide_distinct_long_queries(monkeypatch, tmp_pa
     assert second_query in second_context
 
 
+def test_recall_cache_identity_matches_exact_outbound_request(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeClient:
+        def recall(self, body):
+            calls.append((body["session_id"], body["query"]))
+            return {"results": [{"text": repr((body["session_id"], body["query"]))}]}
+
+    provider._client = FakeClient()
+
+    delimiter_first = provider.prefetch("tail:query", session_id="session")
+    delimiter_second = provider.prefetch("query", session_id="session:tail")
+    case_first = provider.prefetch("Case Query", session_id="case-session")
+    case_second = provider.prefetch("case query", session_id="case-session")
+    whitespace_first = provider.prefetch("  normalized query  ", session_id="whitespace-session")
+    whitespace_second = provider.prefetch("normalized query", session_id="whitespace-session")
+    internal_space_first = provider.prefetch("internal  space", session_id="whitespace-session")
+    internal_space_second = provider.prefetch("internal space", session_id="whitespace-session")
+
+    assert delimiter_first != delimiter_second
+    assert case_first != case_second
+    assert whitespace_first == whitespace_second
+    assert internal_space_first != internal_space_second
+    assert calls == [
+        ("session", "tail:query"),
+        ("session:tail", "query"),
+        ("case-session", "Case Query"),
+        ("case-session", "case query"),
+        ("whitespace-session", "normalized query"),
+        ("whitespace-session", "internal  space"),
+        ("whitespace-session", "internal space"),
+    ]
+
+
+def test_availability_check_does_not_hot_reconfigure_initialized_scope(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeClient:
+        def recall(self, body):
+            identity = (
+                body["agent"],
+                body["namespace"],
+                body["limit"],
+                body["session_id"],
+                body["query"],
+            )
+            calls.append(identity)
+            return {"results": [{"text": repr(identity)}]}
+
+    provider._client = FakeClient()
+    first = provider.prefetch("same-query", session_id="same-session")
+
+    monkeypatch.setenv("NOLDOMEM_AGENT", "scope-b")
+    monkeypatch.setenv("NOLDOMEM_NAMESPACE", "namespace-b")
+    monkeypatch.setenv("NOLDOMEM_RECALL_LIMIT", "7")
+    assert provider.is_available() is True
+    second = provider.prefetch("same-query", session_id="same-session")
+
+    assert len(calls) == 1
+    assert repr(calls[0]) in first
+    assert second == first
+    assert provider._config.agent == "hermes"
+    assert provider._config.namespace == "default"
+    assert provider._config.recall_limit == 5
+    assert list(provider._cache) == [
+        ("hermes", "default", 5, 3500, "same-session", "same-query")
+    ]
+
+
+def test_availability_recheck_cannot_replace_scope_during_recall_validation(
+    monkeypatch,
+    tmp_path,
+):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    validation_started = threading.Event()
+    release_validation = threading.Event()
+
+    class BlockingConfig:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self._agent_reads = 0
+
+        def __getattr__(self, name):
+            if name == "agent":
+                self._agent_reads += 1
+                if self._agent_reads == 2:
+                    validation_started.set()
+                    release_validation.wait(1.0)
+            return getattr(self._wrapped, name)
+
+    provider._config = BlockingConfig(provider._config)
+
+    class FakeClient:
+        def recall(self, body):
+            return {"results": [{"text": repr((body["agent"], body["namespace"]))}]}
+
+    provider._client = FakeClient()
+    results = []
+    worker = threading.Thread(target=lambda: results.append(provider.prefetch("same-query")))
+    worker.start()
+    assert validation_started.wait(1.0)
+
+    monkeypatch.setenv("NOLDOMEM_AGENT", "scope-b")
+    monkeypatch.setenv("NOLDOMEM_NAMESPACE", "namespace-b")
+    availability_returned = threading.Event()
+    availability = []
+    checker = threading.Thread(
+        target=lambda: (availability.append(provider.is_available()), availability_returned.set())
+    )
+    checker.start()
+    returned_during_validation = availability_returned.wait(0.05)
+
+    release_validation.set()
+    worker.join(timeout=1.0)
+    checker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert not checker.is_alive()
+    assert returned_during_validation is False
+    assert availability == [True]
+    assert provider._config.agent == "hermes"
+    assert provider._config.namespace == "default"
+    assert "('hermes', 'default')" in results[0]
+    assert list(provider._cache) == [
+        ("hermes", "default", 5, 3500, "session-1", "same-query")
+    ]
+
+
+def test_recall_cache_keeps_concurrent_separator_collisions_isolated(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    barrier = threading.Barrier(2)
+    results = {}
+
+    class FakeClient:
+        def recall(self, body):
+            barrier.wait(timeout=1.0)
+            identity = (body["session_id"], body["query"])
+            return {"results": [{"text": repr(identity)}]}
+
+    provider._client = FakeClient()
+    identities = [("session", "tail:query"), ("session:tail", "query")]
+    workers = [
+        threading.Thread(
+            target=lambda sid=session_id, query=query: results.setdefault(
+                (sid, query), provider.prefetch(query, session_id=sid)
+            )
+        )
+        for session_id, query in identities
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=1.0)
+
+    assert all(not worker.is_alive() for worker in workers)
+    for identity in identities:
+        assert repr(identity) in results[identity]
+        assert repr(identity) in provider.prefetch(identity[1], session_id=identity[0])
+
+
 def test_recall_cache_remains_bounded_under_concurrency(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path, recall_cache_max_entries=8)
 
@@ -719,7 +1184,53 @@ def test_inflight_old_session_recall_cannot_repopulate_cache_after_switch(monkey
 
     assert "context-session-2" in context
     assert requested_sessions == ["session-1", "session-2"]
-    assert list(provider._cache) == ["session-2:same-query"]
+    assert list(provider._cache) == [
+        ("hermes", "default", 5, 3500, "session-2", "same-query")
+    ]
+
+
+def test_cached_prefetch_cannot_return_context_after_shutdown(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeClient:
+        def recall(self, body):
+            calls.append(body["query"])
+            return {"results": [{"text": "cached context"}]}
+
+    provider._client = FakeClient()
+    assert "cached context" in provider.prefetch("same-query")
+
+    cached_read = threading.Event()
+    release_cached_read = threading.Event()
+    original_cache_get = provider._cache_get
+
+    def blocked_cache_get(key):
+        cached = original_cache_get(key)
+        cached_read.set()
+        release_cached_read.wait(1.0)
+        return cached
+
+    monkeypatch.setattr(provider, "_cache_get", blocked_cache_get)
+    results = []
+    worker = threading.Thread(target=lambda: results.append(provider.prefetch("same-query")))
+    worker.start()
+    assert cached_read.wait(1.0)
+
+    shutdown_returned = threading.Event()
+    shutdown_thread = threading.Thread(target=lambda: (provider.shutdown(), shutdown_returned.set()))
+    shutdown_thread.start()
+    assert shutdown_returned.wait(0.05) is False
+
+    release_cached_read.set()
+    worker.join(timeout=1.0)
+    shutdown_thread.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert shutdown_returned.is_set()
+    assert results == [""]
+    assert calls == ["same-query"]
 
 
 def test_availability_and_tool_discovery_are_network_free(monkeypatch, tmp_path):
@@ -768,6 +1279,7 @@ def test_doctor_default_is_network_free_and_redacts_private_config(monkeypatch, 
     assert "NAMESPACE_MARKER" not in output
 
 
+@requires_posix_deadline
 def test_doctor_live_probe_is_opt_in_bounded_and_allowlisted(monkeypatch, tmp_path, capsys):
     key_file = tmp_path / "key"
     key_file.write_text("test-key", encoding="utf-8")
@@ -811,6 +1323,7 @@ def test_doctor_live_probe_is_opt_in_bounded_and_allowlisted(monkeypatch, tmp_pa
     assert "DETAIL_MARKER" not in output
 
 
+@requires_posix_deadline
 def test_live_probe_omits_non_finite_uptime(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
 
@@ -829,6 +1342,7 @@ def test_live_probe_omits_non_finite_uptime(monkeypatch, tmp_path):
     assert health["uptime_seconds"] is None
 
 
+@requires_posix_deadline
 def test_doctor_live_probe_redacts_raw_exception_text(monkeypatch, tmp_path, capsys):
     key_file = tmp_path / "key"
     key_file.write_text("test-key", encoding="utf-8")
@@ -847,6 +1361,7 @@ def test_doctor_live_probe_redacts_raw_exception_text(monkeypatch, tmp_path, cap
     assert "PRIVATE_EXCEPTION_MARKER" not in output
 
 
+@requires_posix_deadline
 def test_doctor_live_probe_rejects_oversized_payload_without_leaking_it(monkeypatch, tmp_path, capsys):
     key_file = tmp_path / "key"
     key_file.write_text("test-key", encoding="utf-8")
@@ -869,6 +1384,7 @@ def test_doctor_live_probe_rejects_oversized_payload_without_leaking_it(monkeypa
     assert "PRIVATE_PAYLOAD_MARKER" not in output
 
 
+@requires_posix_deadline
 def test_live_probe_enforces_outer_deadline_without_orphan_work(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
 
@@ -916,6 +1432,7 @@ def test_live_probe_fails_closed_when_outer_deadline_cannot_be_installed(monkeyp
     ]
 
 
+@requires_posix_deadline
 def test_live_probe_restores_outer_deadline_when_request_construction_fails(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
     monkeypatch.setenv("NOLDOMEM_BASE_URL", "http://[invalid")
