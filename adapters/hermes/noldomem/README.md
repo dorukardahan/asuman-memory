@@ -105,6 +105,9 @@ A provider instance can be initialized again after a clean shutdown. If the
 previous shutdown deadline expired while an admitted operation was still
 running, reinitialization fails closed until that operation has drained; this
 prevents an old-lifecycle response from crossing into the new provider state.
+Request construction also captures the active lifecycle generation, and
+network admission rejects a body if shutdown, session switch, or
+reinitialization happened before that body reached the client.
 
 Hermes v0.19 owns the executor submission queue used before the provider's
 `queue_prefetch` method is invoked. The provider does not add another queue or

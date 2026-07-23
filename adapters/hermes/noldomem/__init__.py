@@ -387,11 +387,14 @@ class NoldoMemProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if not (self._initialized and self._writes_enabled and user_content and assistant_content):
             return
+        request = self._base_body_snapshot(session_id=session_id, require_writes=True)
+        if request is None:
+            return
+        body, lifecycle_generation = request
         text = _truncate(
             f"User: {user_content.strip()}\nAssistant: {assistant_content.strip()}",
             3000,
         )
-        body = self._base_body(session_id=session_id)
         body.update(
             {
                 "text": text,
@@ -399,7 +402,7 @@ class NoldoMemProvider(MemoryProvider):
                 "source": "hermes-sync-turn",
             }
         )
-        self._safe_store(body)
+        self._safe_store(body, expected_generation=lifecycle_generation)
 
     def on_session_switch(
         self,
@@ -468,47 +471,57 @@ class NoldoMemProvider(MemoryProvider):
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
         try:
             if tool_name == "noldomem_recall":
-                body = self._base_body(session_id=kwargs.get("session_id", ""))
+                request = self._base_body_snapshot(session_id=kwargs.get("session_id", ""))
+                if request is None:
+                    return self._network_unavailable_error()
+                body, lifecycle_generation = request
                 body["query"] = self._request_query(str(args.get("query") or ""))
                 body["limit"] = _as_int(args.get("limit"), self._config.recall_limit, minimum=1, maximum=20)
                 if args.get("namespace"):
                     body["namespace"] = str(args["namespace"])
                 if args.get("memory_type"):
                     body["memory_type"] = self._memory_type(args["memory_type"])
-                with self._network_operation() as client:
+                with self._network_operation(expected_generation=lifecycle_generation) as client:
                     if client is None:
-                        return self._network_unavailable_error()
+                        return self._network_unavailable_error(lifecycle_generation)
                     data = client.recall(body)
-                    if not self._network_result_allowed():
-                        return self._network_unavailable_error()
+                    if not self._network_result_allowed(client, lifecycle_generation):
+                        return self._network_unavailable_error(lifecycle_generation)
                     return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_store":
-                body = self._base_body(session_id=kwargs.get("session_id", ""))
+                request = self._base_body_snapshot(session_id=kwargs.get("session_id", ""))
+                if request is None:
+                    return self._network_unavailable_error()
+                body, lifecycle_generation = request
                 body["text"] = str(args.get("text") or "").strip()
                 body["memory_type"] = self._memory_type(args.get("memory_type") or "other")
                 body["source"] = str(args.get("source") or "hermes-tool")
                 if args.get("namespace"):
                     body["namespace"] = str(args["namespace"])
-                with self._network_operation() as client:
+                with self._network_operation(expected_generation=lifecycle_generation) as client:
                     if client is None:
-                        return self._network_unavailable_error()
+                        return self._network_unavailable_error(lifecycle_generation)
                     data = client.store(body)
-                    if not self._network_result_allowed():
-                        return self._network_unavailable_error()
+                    if not self._network_result_allowed(client, lifecycle_generation):
+                        return self._network_unavailable_error(lifecycle_generation)
                     return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_pin":
                 memory_id = str(args.get("memory_id") or "").strip()
                 if not memory_id:
                     return self._json_error("memory_id is required")
-                body = {"id": memory_id, "agent": self._config.agent}
-                with self._network_operation() as client:
+                request = self._base_body_snapshot()
+                if request is None:
+                    return self._network_unavailable_error()
+                base_body, lifecycle_generation = request
+                body = {"id": memory_id, "agent": base_body["agent"]}
+                with self._network_operation(expected_generation=lifecycle_generation) as client:
                     if client is None:
-                        return self._network_unavailable_error()
+                        return self._network_unavailable_error(lifecycle_generation)
                     data = client.pin(body)
-                    if not self._network_result_allowed():
-                        return self._network_unavailable_error()
+                    if not self._network_result_allowed(client, lifecycle_generation):
+                        return self._network_unavailable_error(lifecycle_generation)
                     return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             return self._json_error(f"unknown tool: {tool_name}")
@@ -524,8 +537,11 @@ class NoldoMemProvider(MemoryProvider):
     ) -> None:
         if not (self._initialized and content.strip() and self._client):
             return
+        request = self._base_body_snapshot()
+        if request is None:
+            return
+        body, lifecycle_generation = request
         memory_type = "preference" if target == "user" else "fact"
-        body = self._base_body()
         body.update(
             {
                 "text": content.strip(),
@@ -534,7 +550,7 @@ class NoldoMemProvider(MemoryProvider):
                 "source": f"hermes-built-in-memory-{action}",
             }
         )
-        self._safe_store(body)
+        self._safe_store(body, expected_generation=lifecycle_generation)
 
     def shutdown(self) -> None:
         started_at = time.monotonic()
@@ -633,19 +649,32 @@ class NoldoMemProvider(MemoryProvider):
             signal.setitimer(signal.ITIMER_REAL, 0.0)
             signal.signal(signal.SIGALRM, previous_signal_handler)
 
-    def _base_body(self, *, session_id: str = "") -> Dict[str, Any]:
-        body = {
-            "agent": self._config.agent,
-            "namespace": self._config.namespace,
-        }
-        sid = session_id or self._session_id
-        if sid:
-            body["session_id"] = sid
-        return body
+    def _base_body_snapshot(
+        self,
+        *,
+        session_id: str = "",
+        require_writes: bool = False,
+    ) -> Optional[tuple[Dict[str, Any], int]]:
+        with self._lock:
+            if (
+                self._closing
+                or not self._initialized
+                or self._client is None
+                or (require_writes and not self._writes_enabled)
+            ):
+                return None
+            body = {
+                "agent": self._config.agent,
+                "namespace": self._config.namespace,
+            }
+            sid = session_id or self._session_id
+            if sid:
+                body["session_id"] = sid
+            return body, self._session_generation
 
-    def _safe_store(self, body: Dict[str, Any]) -> None:
+    def _safe_store(self, body: Dict[str, Any], *, expected_generation: int) -> None:
         try:
-            with self._network_operation() as client:
+            with self._network_operation(expected_generation=expected_generation) as client:
                 if client is not None:
                     client.store(body)
         except Exception:
@@ -659,7 +688,7 @@ class NoldoMemProvider(MemoryProvider):
 
     def _recall_context_from_snapshot(self, snapshot: _RecallSnapshot) -> str:
         try:
-            with self._network_operation() as client:
+            with self._network_operation(expected_generation=snapshot.session_generation) as client:
                 if client is None:
                     return ""
                 data = client.recall(snapshot.request_body())
@@ -729,8 +758,15 @@ class NoldoMemProvider(MemoryProvider):
         return _truncate(query.strip(), RECALL_QUERY_MAX_CHARS)
 
     @contextmanager
-    def _network_operation(self) -> Iterator[Optional[NoldoMemHTTPClient]]:
-        with self._tracked_operation(require_client=True) as (admitted, client):
+    def _network_operation(
+        self,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> Iterator[Optional[NoldoMemHTTPClient]]:
+        with self._tracked_operation(
+            require_client=True,
+            expected_generation=expected_generation,
+        ) as (admitted, client):
             yield client if admitted else None
 
     @contextmanager
@@ -738,11 +774,15 @@ class NoldoMemProvider(MemoryProvider):
         self,
         *,
         require_client: bool,
+        expected_generation: Optional[int] = None,
     ) -> Iterator[tuple[bool, Optional[NoldoMemHTTPClient]]]:
         operation_id: Optional[int] = None
         client: Optional[NoldoMemHTTPClient] = None
         with self._operations_drained:
-            admitted = not self._closing and (
+            generation_matches = (
+                expected_generation is None or expected_generation == self._session_generation
+            )
+            admitted = not self._closing and generation_matches and (
                 not require_client or (self._initialized and self._client is not None)
             )
             if admitted:
@@ -758,18 +798,31 @@ class NoldoMemProvider(MemoryProvider):
                     self._active_operations.pop(operation_id, None)
                     self._operations_drained.notify_all()
 
-    def _network_unavailable_error(self) -> str:
+    def _network_unavailable_error(self, expected_generation: Optional[int] = None) -> str:
         with self._lock:
             if self._closing:
                 return self._json_error("NoldoMem is shutting down")
+            if (
+                expected_generation is not None
+                and expected_generation != self._session_generation
+            ):
+                return self._json_error("NoldoMem request lifecycle expired")
         return self._json_error("NoldoMem is not configured")
 
-    def _network_result_allowed(self) -> bool:
+    def _network_result_allowed(
+        self,
+        client: NoldoMemHTTPClient,
+        expected_generation: int,
+    ) -> bool:
         with self._lock:
             # Results completed during the bounded drain are still valid. Once
-            # shutdown finishes (or times out), it clears both fields and any
-            # later response is discarded.
-            return self._initialized and self._client is not None
+            # shutdown finishes (or times out), it clears the client and bumps
+            # the generation; session switches and reinitialization do likewise.
+            return (
+                self._initialized
+                and self._client is client
+                and expected_generation == self._session_generation
+            )
 
     def _recall_snapshot(self, query: str, *, session_id: str) -> Optional[_RecallSnapshot]:
         with self._lock:

@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -747,6 +748,88 @@ def test_reinitialize_rejects_undrained_operations_from_previous_lifecycle(monke
     provider.initialize("session-2", hermes_home=str(tmp_path))
     assert provider._closing is False
     assert provider._shutdown_deadline is None
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "queue_prefetch",
+        "sync_turn",
+        "memory_write",
+        "tool_recall",
+        "tool_store",
+        "tool_pin",
+    ],
+)
+def test_pre_admission_old_lifecycle_request_cannot_use_reinitialized_client(
+    monkeypatch,
+    tmp_path,
+    caller,
+):
+    provider = _configured_provider(monkeypatch, tmp_path, sync_turns_enabled=True)
+    admission_reached = threading.Event()
+    release_admission = threading.Event()
+    original_network_operation = provider._network_operation
+    tool_results = []
+
+    @contextmanager
+    def blocked_network_operation(*args, **kwargs):
+        admission_reached.set()
+        release_admission.wait(1.0)
+        with original_network_operation(*args, **kwargs) as client:
+            yield client
+
+    monkeypatch.setattr(provider, "_network_operation", blocked_network_operation)
+
+    def invoke():
+        if caller == "queue_prefetch":
+            provider.queue_prefetch("old recall")
+        elif caller == "sync_turn":
+            provider.sync_turn("old user", "old assistant")
+        elif caller == "memory_write":
+            provider.on_memory_write("create", "project", "old write")
+        elif caller == "tool_recall":
+            tool_results.append(
+                json.loads(provider.handle_tool_call("noldomem_recall", {"query": "old tool recall"}))
+            )
+        elif caller == "tool_store":
+            tool_results.append(
+                json.loads(provider.handle_tool_call("noldomem_store", {"text": "old tool store"}))
+            )
+        else:
+            tool_results.append(
+                json.loads(provider.handle_tool_call("noldomem_pin", {"memory_id": "old-tool-pin"}))
+            )
+
+    worker = threading.Thread(target=invoke)
+    worker.start()
+    assert admission_reached.wait(1.0)
+
+    provider.shutdown()
+    provider.initialize("session-2", hermes_home=str(tmp_path))
+    calls = []
+
+    class NewLifecycleClient:
+        def recall(self, body):
+            calls.append(("recall", body))
+            return {"results": [{"text": "new lifecycle context"}]}
+
+        def store(self, body):
+            calls.append(("store", body))
+            return {"stored": True}
+
+        def pin(self, body):
+            calls.append(("pin", body))
+            return {"pinned": True}
+
+    provider._client = NewLifecycleClient()
+    release_admission.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert calls == []
+    if caller.startswith("tool_"):
+        assert tool_results[0]["success"] is False
 
 
 def test_shutdown_budget_includes_time_already_spent_in_active_operations(monkeypatch, tmp_path):
