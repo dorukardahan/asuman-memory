@@ -364,10 +364,14 @@ class NoldoMemProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        with self._tracked_operation(require_client=False) as (admitted, _):
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
             if not admitted or not (self._initialized and self._config.prefetch_enabled and query.strip()):
                 return ""
-            snapshot = self._recall_snapshot(query, session_id=session_id)
+            snapshot = self._recall_snapshot(
+                query,
+                session_id=session_id,
+                expected_generation=admission_generation,
+            )
             if snapshot is None:
                 return ""
             cached = self._cache_get(snapshot.cache_key)
@@ -378,18 +382,26 @@ class NoldoMemProvider(MemoryProvider):
             return self._recall_context_from_snapshot(snapshot)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        with self._tracked_operation(require_client=False) as (admitted, _):
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
             if not admitted or not (self._initialized and self._config.prefetch_enabled and query.strip()):
                 return
-            self._recall_context(query, session_id=session_id)
+            self._recall_context(
+                query,
+                session_id=session_id,
+                expected_generation=admission_generation,
+            )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        with self._tracked_operation(require_client=False) as (admitted, _):
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
             if not admitted or not (
                 self._initialized and self._writes_enabled and user_content and assistant_content
             ):
                 return
-            request = self._base_body_snapshot(session_id=session_id, require_writes=True)
+            request = self._base_body_snapshot(
+                session_id=session_id,
+                require_writes=True,
+                expected_generation=admission_generation,
+            )
             if request is None:
                 return
             body, lifecycle_generation = request
@@ -471,17 +483,32 @@ class NoldoMemProvider(MemoryProvider):
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
-        with self._tracked_operation(require_client=False) as (admitted, _):
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
             if not admitted:
                 return self._network_unavailable_error()
-            return self._handle_registered_tool_call(tool_name, args, **kwargs)
+            return self._handle_registered_tool_call(
+                tool_name,
+                args,
+                admission_generation=admission_generation,
+                **kwargs,
+            )
 
-    def _handle_registered_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
+    def _handle_registered_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        admission_generation: Optional[int],
+        **kwargs: Any,
+    ) -> str:
         try:
             if tool_name == "noldomem_recall":
-                request = self._base_body_snapshot(session_id=kwargs.get("session_id", ""))
+                request = self._base_body_snapshot(
+                    session_id=kwargs.get("session_id", ""),
+                    expected_generation=admission_generation,
+                )
                 if request is None:
-                    return self._network_unavailable_error()
+                    return self._network_unavailable_error(admission_generation)
                 body, lifecycle_generation = request
                 body["query"] = self._request_query(str(args.get("query") or ""))
                 body["limit"] = _as_int(args.get("limit"), self._config.recall_limit, minimum=1, maximum=20)
@@ -498,9 +525,12 @@ class NoldoMemProvider(MemoryProvider):
                     return json.dumps({"success": True, "data": data}, ensure_ascii=False)
 
             if tool_name == "noldomem_store":
-                request = self._base_body_snapshot(session_id=kwargs.get("session_id", ""))
+                request = self._base_body_snapshot(
+                    session_id=kwargs.get("session_id", ""),
+                    expected_generation=admission_generation,
+                )
                 if request is None:
-                    return self._network_unavailable_error()
+                    return self._network_unavailable_error(admission_generation)
                 body, lifecycle_generation = request
                 body["text"] = str(args.get("text") or "").strip()
                 body["memory_type"] = self._memory_type(args.get("memory_type") or "other")
@@ -519,9 +549,9 @@ class NoldoMemProvider(MemoryProvider):
                 memory_id = str(args.get("memory_id") or "").strip()
                 if not memory_id:
                     return self._json_error("memory_id is required")
-                request = self._base_body_snapshot()
+                request = self._base_body_snapshot(expected_generation=admission_generation)
                 if request is None:
-                    return self._network_unavailable_error()
+                    return self._network_unavailable_error(admission_generation)
                 base_body, lifecycle_generation = request
                 body = {"id": memory_id, "agent": base_body["agent"]}
                 with self._network_operation(expected_generation=lifecycle_generation) as client:
@@ -543,10 +573,10 @@ class NoldoMemProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        with self._tracked_operation(require_client=False) as (admitted, _):
+        with self._tracked_operation(require_client=False) as (admitted, _, admission_generation):
             if not admitted or not (self._initialized and content.strip() and self._client):
                 return
-            request = self._base_body_snapshot()
+            request = self._base_body_snapshot(expected_generation=admission_generation)
             if request is None:
                 return
             body, lifecycle_generation = request
@@ -609,7 +639,7 @@ class NoldoMemProvider(MemoryProvider):
             return self._readiness_failure(exc)
 
         try:
-            with self._tracked_operation(require_client=False) as (admitted, _):
+            with self._tracked_operation(require_client=False) as (admitted, _, _):
                 if not admitted:
                     return self._readiness_failure(_ProviderClosed())
                 request = urllib.request.Request(cfg.base_url.rstrip("/") + "/v1/health", method="GET")
@@ -669,10 +699,15 @@ class NoldoMemProvider(MemoryProvider):
         *,
         session_id: str = "",
         require_writes: bool = False,
+        expected_generation: Optional[int] = None,
     ) -> Optional[tuple[Dict[str, Any], int]]:
         with self._lock:
             if (
                 self._closing
+                or (
+                    expected_generation is not None
+                    and expected_generation != self._session_generation
+                )
                 or not self._initialized
                 or self._client is None
                 or (require_writes and not self._writes_enabled)
@@ -695,8 +730,18 @@ class NoldoMemProvider(MemoryProvider):
         except Exception:
             return
 
-    def _recall_context(self, query: str, *, session_id: str = "") -> str:
-        snapshot = self._recall_snapshot(query, session_id=session_id)
+    def _recall_context(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        expected_generation: Optional[int] = None,
+    ) -> str:
+        snapshot = self._recall_snapshot(
+            query,
+            session_id=session_id,
+            expected_generation=expected_generation,
+        )
         if snapshot is None:
             return ""
         return self._recall_context_from_snapshot(snapshot)
@@ -781,7 +826,7 @@ class NoldoMemProvider(MemoryProvider):
         with self._tracked_operation(
             require_client=True,
             expected_generation=expected_generation,
-        ) as (admitted, client):
+        ) as (admitted, client, _):
             yield client if admitted else None
 
     @contextmanager
@@ -790,9 +835,10 @@ class NoldoMemProvider(MemoryProvider):
         *,
         require_client: bool,
         expected_generation: Optional[int] = None,
-    ) -> Iterator[tuple[bool, Optional[NoldoMemHTTPClient]]]:
+    ) -> Iterator[tuple[bool, Optional[NoldoMemHTTPClient], Optional[int]]]:
         operation_id: Optional[int] = None
         client: Optional[NoldoMemHTTPClient] = None
+        admission_generation: Optional[int] = None
         with self._operations_drained:
             generation_matches = (
                 expected_generation is None or expected_generation == self._session_generation
@@ -805,8 +851,9 @@ class NoldoMemProvider(MemoryProvider):
                 self._next_operation_id += 1
                 self._active_operations[operation_id] = time.monotonic()
                 client = self._client
+                admission_generation = self._session_generation
         try:
-            yield admitted, client
+            yield admitted, client, admission_generation
         finally:
             if operation_id is not None:
                 with self._operations_drained:
@@ -839,9 +886,18 @@ class NoldoMemProvider(MemoryProvider):
                 and expected_generation == self._session_generation
             )
 
-    def _recall_snapshot(self, query: str, *, session_id: str) -> Optional[_RecallSnapshot]:
+    def _recall_snapshot(
+        self,
+        query: str,
+        *,
+        session_id: str,
+        expected_generation: Optional[int] = None,
+    ) -> Optional[_RecallSnapshot]:
         with self._lock:
-            if self._closing:
+            if self._closing or (
+                expected_generation is not None
+                and expected_generation != self._session_generation
+            ):
                 return None
             cfg = self._config
             return _RecallSnapshot(

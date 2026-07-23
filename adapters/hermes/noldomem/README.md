@@ -110,6 +110,8 @@ network admission rejects a body if shutdown, session switch, or
 reinitialization happened before that body reached the client.
 Host-lane recall and write callbacks register before snapshotting request state,
 so shutdown cannot miss an old callback and let it adopt a later lifecycle.
+Admission captures the current session generation atomically; a session switch
+before request snapshotting therefore invalidates rather than retargets the callback.
 
 Hermes v0.19 owns the executor submission queue used before the provider's
 `queue_prefetch` method is invoked. The provider does not add another queue or
