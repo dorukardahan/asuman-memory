@@ -6,6 +6,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.27.16] - 2026-07-23
+
 ### Fixed
 - Remove provider-owned background workers from the Hermes adapter, relying on the Hermes v0.19 host executor for turn sync and queued prefetch work while keeping inline memory-write hooks synchronous.
 - Bound the Hermes recall cache with configurable TTL/LRU limits and invalidate it across session and compaction boundaries.
