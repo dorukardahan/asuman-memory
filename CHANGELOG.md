@@ -14,6 +14,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Reset lifecycle gates on clean provider reinitialization while rejecting reuse until any timed-out operation from the previous lifecycle has drained.
 - Bind Hermes request bodies and network admission to the same lifecycle generation so preempted old-session work cannot run against a reinitialized client.
 - Use the active published config for readiness probes so a provider initialized with a non-default profile probes the correct endpoint.
+- Register host-lane recall and write callbacks before request snapshots so shutdown cannot miss preempted old-lifecycle work.
 
 ## [1.27.15] - 2026-07-20
 

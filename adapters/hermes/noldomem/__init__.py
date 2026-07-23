@@ -364,10 +364,8 @@ class NoldoMemProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not (self._initialized and self._config.prefetch_enabled and query.strip()):
-            return ""
         with self._tracked_operation(require_client=False) as (admitted, _):
-            if not admitted:
+            if not admitted or not (self._initialized and self._config.prefetch_enabled and query.strip()):
                 return ""
             snapshot = self._recall_snapshot(query, session_id=session_id)
             if snapshot is None:
@@ -380,29 +378,33 @@ class NoldoMemProvider(MemoryProvider):
             return self._recall_context_from_snapshot(snapshot)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if not (self._initialized and self._config.prefetch_enabled and query.strip()):
-            return
-        self._recall_context(query, session_id=session_id)
+        with self._tracked_operation(require_client=False) as (admitted, _):
+            if not admitted or not (self._initialized and self._config.prefetch_enabled and query.strip()):
+                return
+            self._recall_context(query, session_id=session_id)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        if not (self._initialized and self._writes_enabled and user_content and assistant_content):
-            return
-        request = self._base_body_snapshot(session_id=session_id, require_writes=True)
-        if request is None:
-            return
-        body, lifecycle_generation = request
-        text = _truncate(
-            f"User: {user_content.strip()}\nAssistant: {assistant_content.strip()}",
-            3000,
-        )
-        body.update(
-            {
-                "text": text,
-                "memory_type": "conversation",
-                "source": "hermes-sync-turn",
-            }
-        )
-        self._safe_store(body, expected_generation=lifecycle_generation)
+        with self._tracked_operation(require_client=False) as (admitted, _):
+            if not admitted or not (
+                self._initialized and self._writes_enabled and user_content and assistant_content
+            ):
+                return
+            request = self._base_body_snapshot(session_id=session_id, require_writes=True)
+            if request is None:
+                return
+            body, lifecycle_generation = request
+            text = _truncate(
+                f"User: {user_content.strip()}\nAssistant: {assistant_content.strip()}",
+                3000,
+            )
+            body.update(
+                {
+                    "text": text,
+                    "memory_type": "conversation",
+                    "source": "hermes-sync-turn",
+                }
+            )
+            self._safe_store(body, expected_generation=lifecycle_generation)
 
     def on_session_switch(
         self,
@@ -469,6 +471,12 @@ class NoldoMemProvider(MemoryProvider):
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
+        with self._tracked_operation(require_client=False) as (admitted, _):
+            if not admitted:
+                return self._network_unavailable_error()
+            return self._handle_registered_tool_call(tool_name, args, **kwargs)
+
+    def _handle_registered_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
         try:
             if tool_name == "noldomem_recall":
                 request = self._base_body_snapshot(session_id=kwargs.get("session_id", ""))
@@ -535,22 +543,23 @@ class NoldoMemProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if not (self._initialized and content.strip() and self._client):
-            return
-        request = self._base_body_snapshot()
-        if request is None:
-            return
-        body, lifecycle_generation = request
-        memory_type = "preference" if target == "user" else "fact"
-        body.update(
-            {
-                "text": content.strip(),
-                "memory_type": memory_type,
-                "category": "user" if target == "user" else "other",
-                "source": f"hermes-built-in-memory-{action}",
-            }
-        )
-        self._safe_store(body, expected_generation=lifecycle_generation)
+        with self._tracked_operation(require_client=False) as (admitted, _):
+            if not admitted or not (self._initialized and content.strip() and self._client):
+                return
+            request = self._base_body_snapshot()
+            if request is None:
+                return
+            body, lifecycle_generation = request
+            memory_type = "preference" if target == "user" else "fact"
+            body.update(
+                {
+                    "text": content.strip(),
+                    "memory_type": memory_type,
+                    "category": "user" if target == "user" else "other",
+                    "source": f"hermes-built-in-memory-{action}",
+                }
+            )
+            self._safe_store(body, expected_generation=lifecycle_generation)
 
     def shutdown(self) -> None:
         started_at = time.monotonic()

@@ -832,6 +832,79 @@ def test_pre_admission_old_lifecycle_request_cannot_use_reinitialized_client(
         assert tool_results[0]["success"] is False
 
 
+@pytest.mark.parametrize(
+    "caller",
+    ["queue_recall", "sync_turn", "memory_write", "tool_recall", "tool_store", "tool_pin"],
+)
+def test_host_lane_registers_before_request_snapshot_so_shutdown_cannot_miss_it(
+    monkeypatch,
+    tmp_path,
+    caller,
+):
+    provider = _configured_provider(monkeypatch, tmp_path, sync_turns_enabled=True)
+    snapshot_reached = threading.Event()
+    release_snapshot = threading.Event()
+    shutdown_returned = threading.Event()
+    calls = []
+    snapshot_name = "_recall_snapshot" if caller == "queue_recall" else "_base_body_snapshot"
+    original_snapshot = getattr(provider, snapshot_name)
+
+    class FakeClient:
+        def recall(self, body):
+            calls.append(("recall", body))
+            return {"memory_context": "old"}
+
+        def store(self, body):
+            calls.append(("store", body))
+            return {"stored": True}
+
+        def pin(self, body):
+            calls.append(("pin", body))
+            return {"pinned": True}
+
+    provider._client = FakeClient()
+
+    def blocked_snapshot(*args, **kwargs):
+        snapshot_reached.set()
+        release_snapshot.wait(1.0)
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(provider, snapshot_name, blocked_snapshot)
+
+    def invoke():
+        if caller == "queue_recall":
+            provider.queue_prefetch("old query")
+        elif caller == "sync_turn":
+            provider.sync_turn("old user", "old assistant")
+        elif caller == "memory_write":
+            provider.on_memory_write("store", "user", "old memory")
+        elif caller == "tool_recall":
+            provider.handle_tool_call("noldomem_recall", {"query": "old query"})
+        elif caller == "tool_store":
+            provider.handle_tool_call("noldomem_store", {"text": "old memory"})
+        else:
+            provider.handle_tool_call("noldomem_pin", {"memory_id": "old-memory"})
+
+    worker = threading.Thread(target=invoke)
+    shutdown_thread = threading.Thread(target=lambda: (provider.shutdown(), shutdown_returned.set()))
+
+    try:
+        worker.start()
+        assert snapshot_reached.wait(1.0)
+        shutdown_thread.start()
+        assert _wait_until(lambda: provider._closing, timeout=0.1)
+        shutdown_waited_for_caller = shutdown_returned.wait(0.05) is False
+    finally:
+        release_snapshot.set()
+        worker.join(timeout=1.0)
+        shutdown_thread.join(timeout=1.0)
+
+    assert shutdown_waited_for_caller is True
+    assert not worker.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert calls == []
+
+
 def test_shutdown_budget_includes_time_already_spent_in_active_operations(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
     recall_started = threading.Event()
