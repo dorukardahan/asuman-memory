@@ -101,6 +101,11 @@ return or cache recalled context. A remote store or pin may therefore have an
 indeterminate backend outcome if shutdown wins that race. The real HTTP request
 remains bounded by `timeout_seconds`.
 
+A provider instance can be initialized again after a clean shutdown. If the
+previous shutdown deadline expired while an admitted operation was still
+running, reinitialization fails closed until that operation has drained; this
+prevents an old-lifecycle response from crossing into the new provider state.
+
 Hermes v0.19 owns the executor submission queue used before the provider's
 `queue_prefetch` method is invoked. The provider does not add another queue or
 thread, but the provider contract cannot coalesce calls that are still waiting

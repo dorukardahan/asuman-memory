@@ -364,6 +364,25 @@ def test_shutdown_is_immediate_and_idempotent_without_provider_owned_operations(
     assert not hasattr(provider, "_fallback")
 
 
+def test_provider_can_reinitialize_after_clean_shutdown(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    provider.shutdown()
+
+    provider.initialize("session-2", hermes_home=str(tmp_path))
+
+    class FakeClient:
+        def recall(self, body):
+            return {"results": [{"text": "reinitialized context"}]}
+
+    provider._client = FakeClient()
+
+    assert provider._closing is False
+    assert provider._shutdown_deadline is None
+    assert provider.prefetch("fresh query", session_id="session-2") == (
+        "NoldoMem recall:\n- [memory] reinitialized context"
+    )
+
+
 def test_shutdown_does_not_return_while_synchronous_memory_write_is_running(monkeypatch, tmp_path):
     provider = _configured_provider(monkeypatch, tmp_path)
     operation_started = threading.Event()
@@ -687,6 +706,47 @@ def test_tool_result_is_discarded_if_shutdown_deadline_expires_first(
     assert result[0]["success"] is False
     assert "shutting down" in result[0]["error"].lower()
     assert "private_marker" not in json.dumps(result[0])
+
+
+def test_reinitialize_rejects_undrained_operations_from_previous_lifecycle(monkeypatch, tmp_path):
+    provider = _configured_provider(monkeypatch, tmp_path)
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    result = []
+
+    class FakeClient:
+        def recall(self, body):
+            operation_started.set()
+            release_operation.wait(1.0)
+            return {"private_marker": "old lifecycle"}
+
+    provider._client = FakeClient()
+    monkeypatch.setattr("noldomem.SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+    worker = threading.Thread(
+        target=lambda: result.append(
+            json.loads(provider.handle_tool_call("noldomem_recall", {"query": "old lifecycle"}))
+        )
+    )
+    worker.start()
+    assert operation_started.wait(1.0)
+
+    provider.shutdown()
+    assert worker.is_alive()
+
+    try:
+        with pytest.raises(RuntimeError, match="operations are still active"):
+            provider.initialize("session-2", hermes_home=str(tmp_path))
+    finally:
+        release_operation.set()
+        worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result[0]["success"] is False
+    assert provider._active_operations == {}
+
+    provider.initialize("session-2", hermes_home=str(tmp_path))
+    assert provider._closing is False
+    assert provider._shutdown_deadline is None
 
 
 def test_shutdown_budget_includes_time_already_spent_in_active_operations(monkeypatch, tmp_path):

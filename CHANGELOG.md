@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Bound the Hermes recall cache with configurable TTL/LRU limits and invalidate it across session and compaction boundaries.
 - Keep Hermes adapter discovery network-free and make live readiness an explicit, bounded, privacy-safe doctor option.
 - Isolate Hermes recall cache entries by the full effective request scope, discard recall/tool results that finish after close, reject late backend work with a bounded provider-local shutdown wait, and match Hermes v0.19 context sanitization semantics.
+- Reset lifecycle gates on clean provider reinitialization while rejecting reuse until any timed-out operation from the previous lifecycle has drained.
 
 ## [1.27.15] - 2026-07-20
 

@@ -340,6 +340,10 @@ class NoldoMemProvider(MemoryProvider):
             agent_context == "primary" or cfg.non_primary_writes_enabled
         )
         with self._lock:
+            if self._active_operations:
+                raise RuntimeError("cannot initialize while operations are still active")
+            self._closing = False
+            self._shutdown_deadline = None
             self._config = cfg
             self._client = client
             self._session_id = session_id
