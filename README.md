@@ -49,7 +49,12 @@ cd noldo-memory
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install .
+
+# Smoke check: verify the command and package work outside the checkout
+python -m pip show noldo-memory
+command -v agent-memory
+(cd /tmp && python -c "import agent_memory; print(agent_memory.__file__)")
 
 cp .env.example .env
 # Edit .env: set AGENT_MEMORY_API_KEY (pick any strong secret)
@@ -549,7 +554,7 @@ Pass `"memory_type": "rule"` (or fact/preference/lesson/conversation) in your `/
 ```bash
 cd /path/to/noldo-memory
 git pull origin main
-.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pip install .
 # Compare .env.example with your .env for new variables
 # Database migrations run automatically on startup
 sudo systemctl restart noldo-memory
