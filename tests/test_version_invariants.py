@@ -70,8 +70,6 @@ def test_version_consistency_detects_mismatch(tmp_path, monkeypatch):
     Proves the check is not a constant-true no-op by running it against
     a tree with a deliberately mismatched manifest.
     """
-    import importlib
-
     import tests.test_version_invariants as mod
 
     # Shadow ROOT with a temp copy that has a mismatched pyproject version.
