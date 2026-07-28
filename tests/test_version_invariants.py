@@ -86,9 +86,14 @@ def test_version_consistency_detects_mismatch(tmp_path, monkeypatch):
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes((ROOT / rel).read_bytes())
 
-    # Bump pyproject version only.
+    # Bump pyproject version only. Derive the mismatch from the current
+    # version so this regression stays valid after future releases.
     pp = (fake_root / "pyproject.toml").read_text(encoding="utf-8")
-    pp = pp.replace('version = "1.27.16"', 'version = "99.99.99"', 1)
+    current_version = tomllib.loads(pp)["project"]["version"]
+    mismatched_version = "0.0.0" if current_version != "0.0.0" else "0.0.1"
+    needle = f'version = "{current_version}"'
+    assert needle in pp
+    pp = pp.replace(needle, f'version = "{mismatched_version}"', 1)
     (fake_root / "pyproject.toml").write_text(pp, encoding="utf-8")
 
     # Point the module at the fake root and verify the guard catches the mismatch.
