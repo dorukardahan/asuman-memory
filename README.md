@@ -64,7 +64,7 @@ cp .env.example .env
 
 NoldoMem needs an embedding API (OpenAI-compatible `/v1/embeddings` format).
 
-**Fastest path — use a cloud API** (2 lines in `.env`):
+**Fastest path — use a cloud API** (add these settings to `.env`):
 ```bash
 # In .env:
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
