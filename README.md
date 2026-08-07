@@ -56,7 +56,8 @@ python -m pip show noldo-memory
 command -v agent-memory
 (cd /tmp && python -c "import agent_memory; print(agent_memory.__file__)")
 
-cp .env.example .env
+# Create .env from the template without overwriting an existing file
+test -e .env || cp .env.example .env
 # Edit .env: set AGENT_MEMORY_API_KEY (pick any strong secret)
 ```
 
