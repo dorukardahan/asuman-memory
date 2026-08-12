@@ -1,14 +1,14 @@
-# NoldoMem — Long-Term Memory for OpenClaw AI Agents
+# NoldoMem — Long-Term Memory for OpenClaw and Hermes Agent
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/dorukardahan/noldo-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/dorukardahan/noldo-memory/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 
-> Long-term memory for [OpenClaw](https://github.com/openclaw/openclaw) AI agents. Named after the Noldor — Tolkien's elves renowned for deep knowledge and craft.
+> Persistent, decay-aware long-term memory for [OpenClaw](https://github.com/openclaw/openclaw), with a dedicated adapter for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Named after the Noldor — Tolkien's elves renowned for deep knowledge and craft.
 
-NoldoMem replaces OpenClaw's built-in memory with a persistent, decay-aware memory system. Agents remember important things, forget trivial things over time, and learn from their mistakes — just like real memory.
+NoldoMem replaces OpenClaw's built-in memory and connects to Hermes Agent through its dedicated adapter. Agents remember important things, forget trivial things over time, and learn from their mistakes — just like real memory.
 
-**Built for OpenClaw.** One SQLite file per agent, no cloud DB, no Docker required.
+**OpenClaw-first, with dedicated Hermes Agent support.** One SQLite file per agent, no cloud DB, no Docker required.
 
 ## Why NoldoMem?
 
